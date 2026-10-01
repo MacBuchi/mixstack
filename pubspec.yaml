@@ -47,7 +47,7 @@ dependencies:
   ota_update: ^7.1.0
   # One central logger (DocuHub: fehlerbehandlung-logging.md); the ring buffer
   # a bug report carries is in lib/state/debug_log.dart.
-  logger: ^2.7.0
+  logger: ^2.8.0
 
 dev_dependencies:
   flutter_test:
