@@ -11,7 +11,7 @@ Cross-project guidelines (architecture, state, testing, CI, signing, in-app upda
 ```
 engine/          Pure Rust DSP + file I/O — no FFI, no GUI, fully unit-tested
 rust/            flutter_rust_bridge API layer — thin DTO conversion ONLY, no logic
-cli/             `mixstack` binary (headless) — argument/JSON translation ONLY, no logic
+cli/             `mixstack` binary (headless + MCP server) — argument/JSON/MCP translation ONLY, no logic
 lib/             Flutter app (UI, state, platform file access)
 rust_builder/    cargokit glue (generated, don't touch)
 ```
@@ -40,6 +40,7 @@ mixstack probe <in.wav> --json
 mixstack render <in.wav> --mix <template|session.json> --out <out.wav|flac|mp3> [--start s] [--end s] [--json]
 mixstack measure <in.wav> [--mix …] [--start s] [--end s] [--tracks mix|all|<names>] [--masking off|vs-rest|pairs:<names>] [--json]
 mixstack compare <in.wav> --mix-a a.json --mix-b b.json [--start s] [--end s] [--json]
+mixstack mcp --allow <dir> [--allow <dir>…] --out-dir <dir> [--limits limits.json]   # MCP server on stdio
 cargo run -p durecmix-engine --release --example channel_scaling 200 0.0   # playback AND measurement cost per channel count
 ```
 
@@ -121,6 +122,14 @@ Phase 6/7 of the band player (MacBuchi/bandplayer#8, #22) drives the engine with
   - **The mix is the render-pass-1 bus** (pre-normalisation, no fades); `the_mix_is_the_bus_render_pass_1_measures` pins LUFS and peak against `analyze_mix_level`, and the predicted gain comes from `normalisation_gain` (rule 6).
   - Measured 2026-11-27 (release, user's Mac), `channel_scaling <n> 0.0`: measurement 34 tracks 9.3× realtime, 100 → 3.1×, 200 → 1.5× (linear: per-track cost flat). Real UFX33: 30 s excerpt 3.5 s, whole song 21.9 s. A unity mix of a DUREC take reads as heavily masked because the monitor buses duplicate every source — that is the measurement being right, not wrong.
   - Since Rust 1.100 Clippy rejects `chunks_exact(<const>)` (`chunks_exact_to_as_chunks`); use `as_chunks::<N>().0`. CI's toolchain is `stable`, so a local toolchain older than CI's will pass what CI fails — `rustup update stable` first.
+- **`mixstack mcp` — the MCP server (#167, `cli/src/mcp/`, edits in `engine/src/edit.rs`).** stdio only, `rmcp` pinned to **=3.12.0** (default features off: they pull chrono, RUSTSEC-2026-0543), speaking MCP **2026-07-28** (stateless `server/discover`) and still the 2025-11-25 `initialize` handshake for older clients — `mcp_tests` proves both. Behind the Cargo feature `mcp` (default on in `cli/` only; rmcp/tokio never reach `engine/` or the app). Eight tools, listed alphabetically by the SDK (deterministic): `probe_recording`, `load_mix`, `update_mix`, `revert_mix`, `measure`, `compare_mixes`, `render`, `save_template`. Load-bearing:
+  - **Folders are command-line arguments, not MCP roots** (deprecated by SEP-2577 together with sampling and logging): `--allow <dir>` (repeatable) to read, `--out-dir <dir>` the only place written; output names must be plain file names. Every check runs on **canonical** paths (`cli/src/mcp/paths.rs`: `..`, symlinked files and symlinked folders cannot escape; an existing symlink is never written through). Mastering references named in a template are checked too before a render reads them.
+  - **Model-fixable errors are tool errors (`isError`)**, never protocol errors: path outside, gain out of range, unknown track or revision.
+  - **Edits are the engine's** (`edit::MixOp`, `apply_ops`, `MixHistory`): ranges are the app's controls (fader −60…+6, pan ±1, EQ ±15 dB, HPF 20–500 Hz, low 40–500, mid 200–8000, high 1500–16000 Hz, Q 0.1–10), a batch is all-or-nothing, revert appends (history only grows). Policy limits for agents ("±6 dB EQ per step") are `--limits <file.json>` (`EditLimits`, unknown keys rejected so a typo cannot pass silently) — not engine rules.
+  - **Revisions live in the server process** under a `mix_id`; that is compatible with the stateless spec because the state hangs off the id, not a protocol session. `save_template` is how a mix outlives the process.
+  - **No audio in answers**: `render` returns `structuredContent` + a `resource_link` (`file://…`, mime by format). Long calls block and send progress notifications when the client passes a progress token; the tasks extension (`io.modelcontextprotocol/tasks`, supported by rmcp 3.12 via `TaskManager`) is not used yet — a whole 34-track song renders in ~5 s.
+  - **outputSchema from the engine's types** (`durecmix-engine` feature `schema`, schemars derives). Values that are −∞ for silence serialise as `null`, so those fields are `number|null` in the schema (`schemars(with = "Option<f64>")`) — without that a validating client would reject the measurement of a silent track.
+  - Setup: `cargo install --path cli`, then `claude mcp add mixstack -- mixstack mcp --allow /Volumes/MacStore/Durec --out-dir ~/mixstack-out`. Manual check: `npx @modelcontextprotocol/inspector mixstack mcp --allow … --out-dir …`.
   - The crate-notice asset (`tool/gen_rust_licenses.py`) is workspace-wide, so it now lists the CLI's crates (clap) too — over-inclusive for the app, exactly right for the CLI zip that carries the same file.
 
 ## Errors, logging and what a bug report carries
@@ -279,7 +288,7 @@ xcrun devicectl device process launch --device <udid> --console de.macbuchi.dure
 
 ## Testing
 
-Rust carries the correctness load (145 engine tests + 12 CLI tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
+Rust carries the correctness load (151 engine tests + 12 CLI + 9 path-guard + 4 MCP tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
 
 - `flutter analyze` + `flutter test` after every change; the macOS integration test (`flutter test integration_test -d macos`) is the flow guard and runs in CI.
 - **Keep the integration test in ONE file** — several app launches per run are flaky on macOS. Build synthetic fixtures inline (the doc fixture WAV with iXML), never the user's multi-GB recordings. Network stays off.

@@ -18,6 +18,31 @@ durecmix-engine = { path = "../engine", default-features = false, features = ["m
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# MCP server (`mixstack mcp`, #167). Pinned exactly: the SDK tracks a young
+# specification (2026-07-28: stateless, no initialize) and minor releases
+# have changed wire behaviour. Without default features because the default
+# set pulls chrono (RUSTSEC-2026-0543), which nothing here needs.
+rmcp = { version = "=3.12.0", default-features = false, features = [
+  "base64",
+  "macros",
+  "server",
+  "transport-io",
+], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"], optional = true }
+schemars = { version = "1", optional = true }
+
+[features]
+# On by default so `cargo install --path cli` and the release zip carry the
+# server; `--no-default-features` builds the plain CLI. rmcp/tokio never
+# reach the engine or the app either way — they live in this crate only.
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:schemars", "durecmix-engine/schema"]
 
 [dev-dependencies]
 tempfile = "3"
+rmcp = { version = "=3.12.0", default-features = false, features = [
+  "base64",
+  "client",
+  "transport-child-process",
+] }
+tokio = { version = "1", features = ["full"] }

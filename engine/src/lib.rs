@@ -9,6 +9,7 @@
 pub mod analysis;
 pub mod chain;
 pub mod dsp;
+pub mod edit;
 pub mod error;
 pub mod headless;
 pub mod ixml;

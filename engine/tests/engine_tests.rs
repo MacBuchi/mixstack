@@ -4884,3 +4884,260 @@ mod measure_tests {
         .is_err());
     }
 }
+
+// ── mix editing by operations (#167) ────────────────────────────────────────
+
+mod edit_tests {
+    use durecmix_engine::edit::{apply_ops, EditLimits, EqBandName, MixHistory, MixOp, TrackRef};
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::session::Session;
+    use durecmix_engine::EngineError;
+
+    fn session() -> Session {
+        Session::from_track_info(
+            &["Vox", "Bass", "Keys L", "Keys R"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| TrackInfo {
+                    index: i as u32 + 1,
+                    name: n.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn name(n: &str) -> TrackRef {
+        TrackRef::Name(n.into())
+    }
+
+    #[test]
+    fn operations_apply_in_order_and_log_what_they_did() {
+        let ops = vec![
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.0,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::Mid,
+                enabled: None,
+                gain_db: Some(-2.5),
+                freq: Some(2500.0),
+                q: None,
+            },
+            MixOp::SetHpf {
+                track: TrackRef::Index(2),
+                enabled: None,
+                freq: Some(40.0),
+                slope_db_per_octave: Some(24),
+            },
+            MixOp::SetPan {
+                track: name("Keys L"),
+                pan: -0.7,
+            },
+            MixOp::SetMute {
+                track: name("Keys R"),
+                muted: true,
+            },
+            MixOp::SetPolarity {
+                track: name("Bass"),
+                invert: true,
+            },
+        ];
+        let (s, log) = apply_ops(&session(), &ops, &EditLimits::default()).unwrap();
+        assert_eq!(s.tracks[0].gain_db, -3.0);
+        assert!(
+            s.tracks[0].eq.mid.enabled,
+            "setting a gain enables the band"
+        );
+        assert_eq!(s.tracks[0].eq.mid.freq, 2500.0);
+        assert!(s.tracks[1].eq.hpf_enabled && s.tracks[1].eq.hpf_freq == 40.0);
+        assert!(s.tracks[1].polarity_invert);
+        assert_eq!(s.tracks[2].pan, -0.7);
+        assert!(s.tracks[3].muted);
+        assert_eq!(log.len(), 6);
+        assert_eq!(log[0].name, "Vox");
+        assert!(log[0].change.contains("-3.00"), "{}", log[0].change);
+    }
+
+    #[test]
+    fn the_apps_ranges_are_enforced_and_a_failing_batch_changes_nothing() {
+        let base = session();
+        for bad in [
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: 7.0,
+            },
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: f64::NAN,
+            },
+            MixOp::SetPan {
+                track: name("Vox"),
+                pan: 1.5,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::High,
+                enabled: None,
+                gain_db: Some(16.0),
+                freq: None,
+                q: None,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::Low,
+                enabled: None,
+                gain_db: None,
+                freq: Some(1000.0),
+                q: None,
+            },
+            MixOp::SetHpf {
+                track: name("Vox"),
+                enabled: None,
+                freq: Some(800.0),
+                slope_db_per_octave: None,
+            },
+            MixOp::SetHpf {
+                track: name("Vox"),
+                enabled: None,
+                freq: None,
+                slope_db_per_octave: Some(18),
+            },
+            MixOp::SetGain {
+                track: name("Nobody"),
+                gain_db: 0.0,
+            },
+            MixOp::SetGain {
+                track: TrackRef::Index(99),
+                gain_db: 0.0,
+            },
+        ] {
+            let ops = [
+                MixOp::SetGain {
+                    track: name("Bass"),
+                    gain_db: -1.0,
+                },
+                bad.clone(),
+            ];
+            let err = apply_ops(&base, &ops, &EditLimits::default()).unwrap_err();
+            match err {
+                EngineError::InvalidRequest(m) => assert!(m.starts_with("operation 1"), "{m}"),
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+        assert!(apply_ops(&base, &[], &EditLimits::default()).is_err());
+    }
+
+    #[test]
+    fn caller_limits_narrow_the_ranges() {
+        let limits = EditLimits {
+            max_eq_gain_db: Some(6.0),
+            max_gain_step_db: Some(3.0),
+            ..EditLimits::default()
+        };
+        let eq = |g| MixOp::SetEq {
+            track: name("Vox"),
+            band: EqBandName::Mid,
+            enabled: None,
+            gain_db: Some(g),
+            freq: None,
+            q: None,
+        };
+        assert!(apply_ops(&session(), &[eq(6.0)], &limits).is_ok());
+        assert!(apply_ops(&session(), &[eq(6.5)], &limits).is_err());
+        assert!(apply_ops(
+            &session(),
+            &[MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.0
+            }],
+            &limits
+        )
+        .is_ok());
+        assert!(apply_ops(
+            &session(),
+            &[MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.5
+            }],
+            &limits
+        )
+        .is_err());
+        let json = r#"{"max_eq_gain_db": 6, "gain_db": [-30, 0], "unknown": 1}"#;
+        assert!(
+            serde_json::from_str::<EditLimits>(json).is_err(),
+            "a typo in a limits file must not pass silently"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_must_be_addressed_by_index() {
+        let mut s = session();
+        s.tracks[3].name = "Keys L".into();
+        let op = MixOp::SetGain {
+            track: name("Keys L"),
+            gain_db: -1.0,
+        };
+        assert!(apply_ops(&s, &[op], &EditLimits::default()).is_err());
+        let op = MixOp::SetGain {
+            track: TrackRef::Index(4),
+            gain_db: -1.0,
+        };
+        assert_eq!(
+            apply_ops(&s, &[op], &EditLimits::default())
+                .unwrap()
+                .0
+                .tracks[3]
+                .gain_db,
+            -1.0
+        );
+    }
+
+    #[test]
+    fn operations_parse_from_the_json_an_agent_sends() {
+        let ops: Vec<MixOp> = serde_json::from_str(
+            r#"[{"op":"set_gain","track":"Vox","gain_db":-2},
+                {"op":"set_eq","track":3,"band":"high","gain_db":1.5},
+                {"op":"set_in_mix","track":"Bass","in_mix":false}]"#,
+        )
+        .unwrap();
+        assert_eq!(ops[1].track(), &TrackRef::Index(3));
+        assert!(serde_json::from_str::<MixOp>(r#"{"op":"set_volume","track":"Vox"}"#).is_err());
+    }
+
+    #[test]
+    fn history_keeps_every_revision_and_revert_appends() {
+        let mut h = MixHistory::new(session(), vec![], "load");
+        assert_eq!(h.current(), 0);
+        let (r1, _) = h
+            .update(
+                &[MixOp::SetGain {
+                    track: name("Vox"),
+                    gain_db: -6.0,
+                }],
+                &EditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(r1, 1);
+        assert!(h
+            .update(
+                &[MixOp::SetGain {
+                    track: name("Vox"),
+                    gain_db: 9.0
+                }],
+                &EditLimits::default()
+            )
+            .is_err());
+        assert_eq!(h.current(), 1, "a refused update adds no revision");
+        let r2 = h.revert(0).unwrap();
+        assert_eq!(r2, 2);
+        assert_eq!(h.get(2).unwrap().session, h.get(0).unwrap().session);
+        assert_eq!(
+            h.get(1).unwrap().session.tracks[0].gain_db,
+            -6.0,
+            "the reverted step is still there"
+        );
+        assert!(h.get(7).is_err() && h.revert(7).is_err());
+    }
+}

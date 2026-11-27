@@ -43,6 +43,7 @@ const SCHEMA_MAJOR: &str = "1";
 
 /// Where a template came from — informational only, never used for mapping.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct TemplateSource {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,6 +57,7 @@ pub struct TemplateSource {
 /// written by an older or a third-party tool that leaves fields out still
 /// loads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct TemplateTrack {
     pub name: String,
@@ -130,6 +132,7 @@ impl TemplateTrack {
 /// not stored here; dither only means something for a 16-bit target, which
 /// is also the render's choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct TemplateSettings {
     pub loudness: LoudnessMode,
@@ -172,6 +175,7 @@ impl TemplateSettings {
 
 /// A `mixstack.mix/1` document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Template {
     pub schema: String,
     #[serde(default)]
@@ -190,6 +194,7 @@ pub struct Template {
 
 /// What happens to a track of the take that no template track maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum UnknownTracks {
     /// Out of the mix (`in_mix: false`). The default for templates: a new
@@ -205,6 +210,7 @@ pub enum UnknownTracks {
 
 /// Which mapping round matched a track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum MatchedBy {
     Name,
@@ -215,6 +221,7 @@ pub enum MatchedBy {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MatchedTrack {
     /// The track's name in the take.
     pub name: String,
@@ -230,6 +237,7 @@ pub struct MatchedTrack {
 /// The answer to "what did applying this template actually do", returned
 /// rather than logged so a caller (the band player, an agent) can act on it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MappingReport {
     /// Tracks of the take that got the template's parameters, in take order.
     pub matched: Vec<MatchedTrack>,

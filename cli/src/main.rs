@@ -6,6 +6,9 @@
 //! `durecmix_engine::headless`, the same way `rust/` only translates for the
 //! app. Contract (schemas, exit codes): AGENTS.md, section "CLI".
 
+#[cfg(feature = "mcp")]
+mod mcp;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,7 +22,7 @@ use durecmix_engine::render::{LoudnessMode, OutputFormat};
 use durecmix_engine::template::{UnknownTracks, TEMPLATE_SCHEMA};
 
 /// The release this binary belongs to (pubspec.yaml, via build.rs).
-const VERSION: &str = env!("MIXSTACK_VERSION");
+pub(crate) const VERSION: &str = env!("MIXSTACK_VERSION");
 const ERROR_SCHEMA: &str = "mixstack.error/1";
 
 #[derive(Parser)]
@@ -51,6 +54,25 @@ enum Cmd {
     Measure(MeasureArgs),
     /// Measure two mixes of one recording and report the differences (b − a).
     Compare(CompareArgs),
+    /// Serve the engine to an agent over MCP (stdio).
+    #[cfg(feature = "mcp")]
+    Mcp(McpArgs),
+}
+
+#[cfg(feature = "mcp")]
+#[derive(clap::Args)]
+struct McpArgs {
+    /// A folder the server may read recordings, templates and mastering
+    /// references from (and below). Repeatable; at least one.
+    #[arg(long = "allow", required = true)]
+    allow: Vec<PathBuf>,
+    /// The only folder the server writes to (renders, templates).
+    #[arg(long)]
+    out_dir: PathBuf,
+    /// Optional JSON with tighter edit limits than the app's ranges, e.g.
+    /// {"max_eq_gain_db": 6, "max_gain_step_db": 3}.
+    #[arg(long)]
+    limits: Option<PathBuf>,
 }
 
 /// What to measure and how — shared by `measure` and `compare`.
@@ -268,23 +290,6 @@ fn parse_bitrate(s: &str) -> Result<u32, String> {
     }
 }
 
-/// Format from the target's extension, the app's defaults (24-bit).
-fn format_for(out: &Path) -> Result<OutputFormat, HeadlessError> {
-    let ext = out
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "wav" => Ok(OutputFormat::Wav24),
-        "flac" => Ok(OutputFormat::Flac24),
-        "mp3" => Ok(OutputFormat::Mp3),
-        _ => Err(HeadlessError::Usage(format!(
-            "cannot tell the format from {:?} — use .wav, .flac or .mp3, or pass --format",
-            out.display()
-        ))),
-    }
-}
-
 /// Exit codes, part of the contract: 0 ok, 1 render failed, 2 usage,
 /// 3 input unreadable, 4 the mix matches no track, 5 output not writable.
 fn exit_code(e: &HeadlessError) -> u8 {
@@ -359,7 +364,7 @@ fn probe(input: &Path, json: bool) -> Result<(), HeadlessError> {
 fn render(a: &RenderArgs) -> Result<(), HeadlessError> {
     let format = match a.format {
         Some(f) => f.into(),
-        None => format_for(&a.out)?,
+        None => headless::format_for_path(&a.out)?,
     };
     let take = headless::open_take(&a.input)?;
     let template = headless::load_mix(&a.mix)?;
@@ -530,6 +535,17 @@ fn main() -> ExitCode {
         Some(Cmd::Render(a)) => (render(a), a.json),
         Some(Cmd::Measure(a)) => (measure_cmd(a), a.flags.json),
         Some(Cmd::Compare(a)) => (compare_cmd(a), a.flags.json),
+        #[cfg(feature = "mcp")]
+        Some(Cmd::Mcp(a)) => {
+            // stdout is the protocol channel here: nothing else may print.
+            return match mcp::run(&a.allow, &a.out_dir, a.limits.as_deref()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("mixstack mcp: {e}");
+                    ExitCode::from(2)
+                }
+            };
+        }
         None => {
             eprintln!(
                 "{}\n\nUsage: mixstack <probe|render|measure|compare> … (see --help)",

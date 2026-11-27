@@ -125,6 +125,7 @@ pub fn open_take(path: &Path) -> Result<Take> {
 
 /// `mixstack.probe/1`.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProbeOutput {
     pub schema: &'static str,
     pub path: String,
@@ -196,6 +197,24 @@ impl Default for RenderOptions {
             mp3_bitrate_kbps: r.mp3_bitrate_kbps,
             unknown: UnknownTracks::Exclude,
         }
+    }
+}
+
+/// The output format a target's extension implies, at the app's defaults:
+/// `.wav` and `.flac` are 24-bit, `.mp3` is CBR at the chosen bitrate.
+pub fn format_for_path(out: &Path) -> Result<OutputFormat> {
+    let ext = out
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "wav" => Ok(OutputFormat::Wav24),
+        "flac" => Ok(OutputFormat::Flac24),
+        "mp3" => Ok(OutputFormat::Mp3),
+        _ => Err(HeadlessError::Usage(format!(
+            "cannot tell the format from {:?} — use .wav, .flac or .mp3, or name the format",
+            out.display()
+        ))),
     }
 }
 
@@ -306,6 +325,7 @@ pub fn reference_profile(settings: &RenderSettings) -> Result<Option<ReferencePr
 
 /// The trimmed range a render covers, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RangeSeconds {
     pub start: f64,
     pub end: f64,
@@ -322,6 +342,7 @@ pub fn range_seconds(settings: &RenderSettings, take: &Take) -> RangeSeconds {
 
 /// `mixstack.render/1`.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RenderOutput {
     pub schema: &'static str,
     pub input: String,
@@ -476,6 +497,7 @@ pub fn fresh_template(take: &Take) -> Template {
 
 /// `mixstack.measure/1` as the CLI and the MCP server print it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MeasureOutput {
     pub input: String,
     #[serde(flatten)]
@@ -486,6 +508,7 @@ pub struct MeasureOutput {
 
 /// `mixstack.compare/1` as the CLI and the MCP server print it.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompareOutput {
     pub input: String,
     #[serde(flatten)]
