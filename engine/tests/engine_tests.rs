@@ -3914,3 +3914,297 @@ fn a_two_hundred_channel_take_mixes_and_meters_correctly() {
         );
     }
 }
+
+// ── mix templates (mixstack.mix/1, #164) ────────────────────────────────────
+
+mod template_tests {
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::mix::TrackParams;
+    use durecmix_engine::render::{LoudnessMode, OutputFormat, RenderSettings};
+    use durecmix_engine::session::Session;
+    use durecmix_engine::template::{
+        apply_template, normalize_name, MatchedBy, Template, UnknownTracks, TEMPLATE_SCHEMA,
+    };
+
+    fn info(index: u32, name: &str) -> TrackInfo {
+        TrackInfo {
+            index,
+            name: name.into(),
+        }
+    }
+
+    /// A session with every track bent away from its defaults, so a lost
+    /// field cannot hide behind a default value.
+    fn bent_session(names: &[&str]) -> Session {
+        let mut s = Session::from_track_info(
+            &names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| info(i as u32 + 1, n))
+                .collect::<Vec<_>>(),
+        );
+        for (i, t) in s.tracks.iter_mut().enumerate() {
+            t.gain_db = -3.0 - i as f64;
+            t.pan = 0.25 * i as f64 - 0.5;
+            t.polarity_invert = i % 2 == 0;
+            t.eq.hpf_enabled = true;
+            t.eq.hpf_freq = 60.0 + 10.0 * i as f64;
+            t.eq.mid.enabled = true;
+            t.eq.mid.gain_db = 2.5;
+        }
+        s.settings.loudness = LoudnessMode::LufsIntegrated(-16.0);
+        s.settings.ceiling_dbtp = -1.5;
+        // Per-render fields that must NOT travel with a template.
+        s.settings.trim_start_frame = 1000;
+        s.settings.trim_end_frame = Some(5000);
+        s.settings.fade_in_ms = 80.0;
+        s.settings.format = OutputFormat::Mp3;
+        s
+    }
+
+    #[test]
+    fn template_round_trips_through_json() {
+        let s = bent_session(&["Vox", "Bass", "Keys L", "Keys R"]);
+        let mut t = Template::from_session_with_tags(&s, &[vec!["vocals".into()]]);
+        t.name = "Band".into();
+        t.created = Some("2026-11-25T21:10:00Z".into());
+        let back = Template::from_json(&t.to_json().unwrap()).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.schema, TEMPLATE_SCHEMA);
+        assert_eq!(back.tracks[0].tags, vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn template_leaves_per_render_settings_out() {
+        let s = bent_session(&["Vox"]);
+        let json = Template::from_session(&s).to_json().unwrap();
+        for field in [
+            "trim_start_frame",
+            "trim_end_frame",
+            "fade_in_ms",
+            "format",
+            "dither",
+        ] {
+            assert!(
+                !json.contains(field),
+                "{field} leaked into the template: {json}"
+            );
+        }
+        let applied = apply_template(
+            &Template::from_json(&json).unwrap(),
+            &[info(1, "Vox")],
+            UnknownTracks::Exclude,
+        );
+        assert_eq!(applied.session.settings.trim_start_frame, 0);
+        assert_eq!(
+            applied.session.settings.format,
+            RenderSettings::default().format
+        );
+        assert_eq!(
+            applied.session.settings.loudness,
+            LoudnessMode::LufsIntegrated(-16.0)
+        );
+        assert_eq!(applied.session.settings.ceiling_dbtp, -1.5);
+    }
+
+    #[test]
+    fn template_applied_to_its_own_take_reproduces_the_session_tracks() {
+        let names = ["Vox", "Bass", "Keys L", "Keys R"];
+        let s = bent_session(&names);
+        let take: Vec<_> = s.tracks.iter().map(|t| info(t.index, &t.name)).collect();
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.session.tracks, s.tracks);
+        assert!(applied.report.unknown.is_empty() && applied.report.missing.is_empty());
+        assert!(applied
+            .report
+            .matched
+            .iter()
+            .all(|m| m.by == MatchedBy::Name));
+    }
+
+    #[test]
+    fn mapping_follows_names_when_the_channel_order_changes() {
+        let s = bent_session(&["Vox", "Bass", "Gtr"]);
+        // Next rehearsal: same tracks, different interleave order.
+        let take = [info(1, "Gtr"), info(2, "Vox"), info(3, "Bass")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        let by_name = |n: &str| {
+            applied
+                .session
+                .tracks
+                .iter()
+                .find(|t| t.name == n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_name("Vox").gain_db, s.tracks[0].gain_db);
+        assert_eq!(
+            by_name("Vox").index,
+            2,
+            "the take's index wins, not the template's"
+        );
+        assert_eq!(by_name("Gtr").gain_db, s.tracks[2].gain_db);
+    }
+
+    #[test]
+    fn renamed_track_falls_back_to_its_index_and_new_tracks_are_unknown() {
+        // The example from issue #164.
+        let s = bent_session(&["Bass_Out", "Kanal 2 alt", "Keys_O S L"]);
+        let t = Template::from_session(&s);
+        let take = [
+            info(1, "Bass_Out"),
+            info(2, "Kanal 12"),
+            info(4, "Neue Spur"),
+        ];
+        let applied = apply_template(&t, &take, UnknownTracks::Exclude);
+        let r = &applied.report;
+        assert_eq!(r.matched.len(), 2);
+        assert_eq!(r.matched[0].by, MatchedBy::Name);
+        assert_eq!(r.matched[1].by, MatchedBy::Index);
+        assert_eq!(r.matched[1].name, "Kanal 12");
+        assert_eq!(r.matched[1].template_name, "Kanal 2 alt");
+        assert_eq!(r.unknown, vec!["Neue Spur".to_string()]);
+        assert_eq!(r.missing, vec!["Keys_O S L".to_string()]);
+        assert_eq!(applied.session.tracks[1].gain_db, s.tracks[1].gain_db);
+    }
+
+    #[test]
+    fn a_template_track_claimed_by_name_is_not_reused_by_index() {
+        // "Vox" moved from channel 1 to channel 2; the new channel 1 must not
+        // inherit Vox's fader through the index round.
+        let s = bent_session(&["Vox"]);
+        let take = [info(1, "Click"), info(2, "Vox")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.report.unknown, vec!["Click".to_string()]);
+        assert!(!applied.session.tracks[0].in_mix);
+        assert_eq!(applied.session.tracks[1].gain_db, s.tracks[0].gain_db);
+    }
+
+    #[test]
+    fn unknown_tracks_follow_the_callers_rule() {
+        let t = Template::from_session(&bent_session(&["Vox"]));
+        let take = [info(1, "Vox"), info(2, "Keys L")];
+        let ex = apply_template(&t, &take, UnknownTracks::Exclude);
+        assert!(
+            !ex.session.tracks[1].in_mix,
+            "exclude is the template default"
+        );
+        let inc = apply_template(&t, &take, UnknownTracks::Include);
+        assert!(inc.session.tracks[1].in_mix);
+        assert_eq!(inc.session.tracks[1].gain_db, 0.0);
+        // Same defaults as a fresh session — the sanctioned L/R pan rule only.
+        assert_eq!(inc.session.tracks[1].pan, -1.0);
+        assert_eq!(UnknownTracks::default(), UnknownTracks::Exclude);
+    }
+
+    #[test]
+    fn normalised_names_match_but_are_reported_as_such() {
+        assert_eq!(normalize_name("  Bass   OUT "), "bass out");
+        assert_ne!(normalize_name("Bass_Out"), normalize_name("Bass Out"));
+        let t = Template::from_session(&bent_session(&["Bass Out"]));
+        let take = [info(7, "bass  out")];
+        let applied = apply_template(&t, &take, UnknownTracks::Exclude);
+        assert_eq!(applied.report.matched[0].by, MatchedBy::Normalized);
+        assert!(applied.session.tracks[0].in_mix);
+    }
+
+    #[test]
+    fn duplicate_names_pair_up_in_order() {
+        let mut s = bent_session(&["Mic", "Mic"]);
+        s.tracks[0].gain_db = -1.0;
+        s.tracks[1].gain_db = -2.0;
+        let take = [info(5, "Mic"), info(6, "Mic")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.session.tracks[0].gain_db, -1.0);
+        assert_eq!(applied.session.tracks[1].gain_db, -2.0);
+        assert!(applied.report.missing.is_empty());
+    }
+
+    #[test]
+    fn a_template_from_another_setup_matches_nothing() {
+        let t = Template::from_session(&bent_session(&["A"]));
+        // Index 0 means "unknown" and must never match anything either.
+        let mut t0 = t.clone();
+        t0.tracks[0].index = 0;
+        let applied = apply_template(&t0, &[info(1, "Z")], UnknownTracks::Include);
+        assert!(applied.report.matched_nothing());
+        assert_eq!(applied.report.missing, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn sparse_template_from_another_tool_loads_with_defaults() {
+        let json = r#"{
+            "schema": "mixstack.mix/1",
+            "tracks": [ { "name": "Vox", "gain_db": -4.0, "tags": ["vocals"], "future_field": 1 } ],
+            "settings": { "loudness": { "LufsIntegrated": -14.0 } },
+            "something_new": { "x": 1 }
+        }"#;
+        let t = Template::from_json(json).unwrap();
+        let tr = &t.tracks[0];
+        assert_eq!(tr.gain_db, -4.0);
+        assert!(tr.in_mix && !tr.muted && tr.pan == 0.0 && !tr.eq.is_active());
+        assert!(t.settings.limiter_enabled);
+        assert_eq!(t.settings.ceiling_dbtp, -1.0);
+        let applied = apply_template(&t, &[info(3, "Vox")], UnknownTracks::Exclude);
+        assert_eq!(applied.tags[0], vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn foreign_or_future_schemas_are_refused() {
+        assert!(Template::from_json(r#"{"schema":"mixstack.mix/2"}"#).is_err());
+        assert!(Template::from_json(r#"{"schema":"other/1"}"#).is_err());
+        assert!(Template::from_json(r#"{"tracks":[]}"#).is_err());
+    }
+
+    #[test]
+    fn a_stored_session_is_accepted_wherever_a_template_is() {
+        let s = bent_session(&["Vox", "Bass"]);
+        let t = Template::from_template_or_session_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(t, Template::from_session(&s));
+        let tpl = Template::from_session(&s).to_json().unwrap();
+        assert_eq!(
+            Template::from_template_or_session_json(&tpl).unwrap(),
+            Template::from_session(&s)
+        );
+        assert!(Template::from_template_or_session_json("{}").is_err());
+    }
+
+    #[test]
+    fn tags_survive_apply_then_save() {
+        let s = bent_session(&["Vox", "Bass"]);
+        let t = Template::from_session_with_tags(&s, &[vec!["vocals".into()], vec!["bass".into()]]);
+        // Swap the order in the take; tags must follow the track, not the slot.
+        let applied = apply_template(
+            &t,
+            &[info(1, "Bass"), info(2, "Vox")],
+            UnknownTracks::Exclude,
+        );
+        let again = Template::from_session_with_tags(&applied.session, &applied.tags);
+        assert_eq!(again.tracks[0].name, "Bass");
+        assert_eq!(again.tracks[0].tags, vec!["bass".to_string()]);
+        assert_eq!(again.tracks[1].tags, vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn mapping_is_linear_in_the_channel_count() {
+        // Not a benchmark — a guard against a quadratic search sneaking back
+        // in: 4000 tracks, every one renamed so all three rounds run.
+        let n = 4000;
+        let tracks: Vec<TrackParams> = (1..=n)
+            .map(|i| TrackParams::new(i, format!("T{i}"), 0.0))
+            .collect();
+        let s = Session {
+            tracks,
+            ..Session::default()
+        };
+        let take: Vec<_> = (1..=n).map(|i| info(i, &format!("R{i}"))).collect();
+        let t0 = std::time::Instant::now();
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert!(t0.elapsed().as_secs_f64() < 1.0, "{:?}", t0.elapsed());
+        assert!(applied
+            .report
+            .matched
+            .iter()
+            .all(|m| m.by == MatchedBy::Index));
+    }
+}

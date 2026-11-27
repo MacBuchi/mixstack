@@ -20,6 +20,8 @@ pub enum EngineError {
     Json(#[from] serde_json::Error),
     #[error("WAV encode error: {0}")]
     Encode(String),
+    #[error("schema error: {0}")]
+    Schema(String),
     #[error("mastering error: {0}")]
     Mastering(String),
 }
