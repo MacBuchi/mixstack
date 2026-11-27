@@ -4412,3 +4412,475 @@ mod headless_tests {
         assert_eq!(s.settings.mp3_bitrate_kbps, 320);
     }
 }
+
+// ── measurement (#166) ──────────────────────────────────────────────────────
+
+mod measure_tests {
+    use super::{chunk, fmt_payload};
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::measure::{
+        compare, measure, spreading_db, LevelPoint, MaskingMode, MeasureJob, MeasureOptions,
+        Measurement, TrackSelection, MAX_PAIR_TRACKS,
+    };
+    use durecmix_engine::render::{analyze_mix_level, LoudnessMode, RenderSettings};
+    use durecmix_engine::session::Session;
+    use durecmix_engine::wav::InputHandle;
+    use durecmix_engine::EngineError;
+    use std::f64::consts::TAU;
+
+    const SR: u32 = 48_000;
+
+    fn noise(seed: &mut u64) -> f64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    }
+
+    fn sine(freq: f64, dbfs: f64, secs: f64) -> Vec<f64> {
+        let a = 10f64.powf(dbfs / 20.0);
+        (0..(secs * SR as f64) as usize)
+            .map(|n| a * (TAU * freq * n as f64 / SR as f64).sin())
+            .collect()
+    }
+
+    /// White noise with the given RMS in dBFS.
+    fn white(rms_dbfs: f64, secs: f64, seed: u64) -> Vec<f64> {
+        let mut s = seed;
+        // Uniform on [−1, 1] has RMS 1/√3.
+        let a = 10f64.powf(rms_dbfs / 20.0) * 3f64.sqrt();
+        (0..(secs * SR as f64) as usize)
+            .map(|_| a * noise(&mut s))
+            .collect()
+    }
+
+    /// 24-bit take with one channel per signal and iXML names T1, T2, ….
+    fn take(dir: &std::path::Path, signals: &[Vec<f64>]) -> (InputHandle, Vec<TrackInfo>) {
+        let ch = signals.len();
+        let frames = signals[0].len();
+        let mut data = Vec::with_capacity(frames * ch * 3);
+        for n in 0..frames {
+            for s in signals {
+                let v = (s[n].clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
+                data.extend_from_slice(&v.to_le_bytes()[0..3]);
+            }
+        }
+        let mut tracks = String::new();
+        for i in 1..=ch {
+            tracks.push_str(&format!(
+                "<TRACK><INTERLEAVE_INDEX>{i}</INTERLEAVE_INDEX><NAME>T{i}</NAME></TRACK>"
+            ));
+        }
+        let ixml =
+            format!("<?xml version=\"1.0\"?><BWFXML><TRACK_LIST>{tracks}</TRACK_LIST></BWFXML>");
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt_payload(1, ch as u16, SR, 24)));
+        body.extend(chunk(b"data", &data));
+        body.extend(chunk(b"iXML", ixml.as_bytes()));
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend(body);
+        let p = dir.join("take.wav");
+        std::fs::write(&p, file).unwrap();
+        let infos = (1..=ch as u32)
+            .map(|i| TrackInfo {
+                index: i,
+                name: format!("T{i}"),
+            })
+            .collect();
+        (InputHandle::Path(p.to_string_lossy().into_owned()), infos)
+    }
+
+    fn run(input: &InputHandle, s: &Session, opts: &MeasureOptions) -> Measurement {
+        measure(
+            input,
+            &[MeasureJob {
+                tracks: &s.tracks,
+                tags: &[],
+                settings: &s.settings,
+            }],
+            opts,
+            |_| {},
+        )
+        .unwrap()
+        .remove(0)
+    }
+
+    fn band(m: &Measurement, hz: f64) -> usize {
+        m.bands_hz.iter().position(|&b| b == hz).unwrap()
+    }
+
+    #[test]
+    fn ebu_tech_3341_case_1_stereo_sine_reads_minus_23_lufs() {
+        // Tech 3341 test 1: 1 kHz sine at −23 dBFS in both channels → −23.0
+        // LUFS ±0.1. Two hard-panned tracks rebuild the stereo file exactly.
+        let dir = tempfile::tempdir().unwrap();
+        let s = sine(1000.0, -23.0, 20.0);
+        let (input, infos) = take(dir.path(), &[s.clone(), s]);
+        let mut session = Session::from_track_info(&infos);
+        session.tracks[0].pan = -1.0;
+        session.tracks[1].pan = 1.0;
+        let m = run(&input, &session, &MeasureOptions::default());
+        assert!(
+            (m.mix.level.lufs_i + 23.0).abs() < 0.1,
+            "{}",
+            m.mix.level.lufs_i
+        );
+        assert!((m.mix.level.sample_peak_dbfs + 23.0).abs() < 0.01);
+        assert!((m.mix.level.true_peak_dbtp + 23.0).abs() < 0.2);
+        assert!(m.mix.level.lra < 0.5);
+        assert!((m.mix.level.short_term_lufs.p50 + 23.0).abs() < 0.1);
+        // A sine's crest factor is 3.01 dB, its PLR here 0 LU.
+        assert!(
+            (m.mix.level.crest_db - 3.01).abs() < 0.05,
+            "{}",
+            m.mix.level.crest_db
+        );
+        assert!(m.mix.level.plr_db.abs() < 0.2);
+        // Identical channels: fully correlated, no side signal.
+        assert!((m.mix.correlation - 1.0).abs() < 1e-9);
+        assert!(m.mix.width < 1e-6);
+        assert!((m.mix.level.active_fraction - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn a_sine_lands_in_its_third_octave_band_at_its_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(1000.0, -20.0, 5.0), sine(100.0, -12.0, 5.0)],
+        );
+        let session = Session::from_track_info(&infos);
+        let opts = MeasureOptions {
+            point: LevelPoint::PreFader,
+            ..MeasureOptions::default()
+        };
+        let m = run(&input, &session, &opts);
+        let t1 = &m.tracks[0].level.ltas_db;
+        // AES17: a sine of peak −20 dBFS reads −20 dB in its band.
+        assert!(
+            (t1[band(&m, 1000.0)] + 20.0).abs() < 0.3,
+            "{}",
+            t1[band(&m, 1000.0)]
+        );
+        assert!(t1[band(&m, 500.0)] < -60.0 && t1[band(&m, 2000.0)] < -60.0);
+        let t2 = &m.tracks[1].level.ltas_db;
+        // 100 Hz is resolved coarsely (bins are 23 Hz) but the energy stays put.
+        let near: f64 = [80.0, 100.0, 125.0]
+            .iter()
+            .map(|&f| 10f64.powf(t2[band(&m, f)] / 10.0))
+            .sum();
+        assert!(
+            (10.0 * near.log10() + 12.0).abs() < 0.5,
+            "{}",
+            10.0 * near.log10()
+        );
+        assert_eq!(m.bands_hz.len(), 30);
+        assert_eq!(m.bands_hz[0], 25.0);
+        assert!((m.frame_seconds - 2048.0 / 48_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_mix_is_the_bus_render_pass_1_measures() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[
+                sine(220.0, -14.0, 4.0),
+                white(-24.0, 4.0, 7),
+                sine(3000.0, -30.0, 4.0),
+            ],
+        );
+        let mut session = Session::from_track_info(&infos);
+        session.tracks[0].gain_db = -3.0;
+        session.tracks[1].eq.hpf_enabled = true;
+        session.tracks[2].pan = 0.4;
+        session.settings.trim_start_frame = 4_800;
+        session.settings.trim_end_frame = Some(150_000);
+        session.settings.loudness = LoudnessMode::LufsIntegrated(-16.0);
+        let m = run(&input, &session, &MeasureOptions::default());
+        let level = analyze_mix_level(&input, &session.tracks, &session.settings, |_| {}).unwrap();
+        assert!((m.mix.level.lufs_i - level.integrated_lufs).abs() < 1e-9);
+        assert!((m.mix.level.sample_peak_dbfs - 20.0 * level.peak.log10()).abs() < 1e-9);
+        // The predicted gain is the render's own formula on those numbers.
+        assert!(
+            (m.mix.normalisation_gain_db.unwrap() - (-16.0 - level.integrated_lufs)).abs() < 1e-9
+        );
+        assert!((m.range.start - 0.1).abs() < 1e-12 && (m.range.end - 3.125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_track_under_loud_noise_in_its_band_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(1000.0, -40.0, 4.0), white(-3.0, 4.0, 1)]);
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let mask = m.tracks[0].masking.as_ref().unwrap();
+        let b = band(&m, 1000.0);
+        assert!(mask.msr_db[b].unwrap() > 0.0, "{:?}", mask.msr_db[b]);
+        assert!(mask.masked_time_fraction[b].unwrap() > 0.95);
+        assert!(mask.m_index > 0.0);
+        // The noise itself is not masked by a quiet sine.
+        let noise_mask = m.tracks[1].masking.as_ref().unwrap();
+        assert_eq!(noise_mask.masked_time_fraction[b], Some(0.0));
+    }
+
+    #[test]
+    fn tracks_in_separate_bands_do_not_mask_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(5000.0, -30.0, 4.0), sine(100.0, -6.0, 4.0)],
+        );
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let mask = m.tracks[0].masking.as_ref().unwrap();
+        assert_eq!(mask.masked_time_fraction[band(&m, 5000.0)], Some(0.0));
+        assert!(mask.msr_db[band(&m, 5000.0)].unwrap() < -40.0);
+        assert_eq!(mask.masked_fraction, 0.0);
+        // Bands where the track has nothing are not counted at all.
+        assert_eq!(mask.msr_db[band(&m, 250.0)], None);
+    }
+
+    #[test]
+    fn lowering_the_masker_reduces_masking() {
+        // The closed loop in miniature: one measure → change → measure step.
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(1000.0, -30.0, 4.0), white(-3.0, 4.0, 1)]);
+        let a = Session::from_track_info(&infos);
+        let mut b = a.clone();
+        b.tracks[1].gain_db = -20.0;
+        let out = measure(
+            &input,
+            &[
+                MeasureJob {
+                    tracks: &a.tracks,
+                    tags: &[],
+                    settings: &a.settings,
+                },
+                MeasureJob {
+                    tracks: &b.tracks,
+                    tags: &[],
+                    settings: &b.settings,
+                },
+            ],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        let mut it = out.into_iter();
+        let c = compare(it.next().unwrap(), it.next().unwrap()).unwrap();
+        let t1 = &c.delta.tracks[0];
+        assert!(t1.masking.as_ref().unwrap().masked_fraction < -0.5);
+        assert!(t1.level.lufs_i.abs() < 1e-9, "T1 itself did not change");
+        let t2 = &c.delta.tracks[1];
+        assert!((t2.level.lufs_i + 20.0).abs() < 0.01, "{}", t2.level.lufs_i);
+        assert!(c.delta.mix.level.lufs_i < -10.0);
+    }
+
+    #[test]
+    fn comparing_a_mix_with_itself_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(440.0, -20.0, 3.0), white(-30.0, 3.0, 3)]);
+        let s = Session::from_track_info(&infos);
+        let a = run(&input, &s, &MeasureOptions::default());
+        let c = compare(a.clone(), a).unwrap();
+        assert_eq!(c.delta.mix.level.lufs_i, 0.0);
+        assert!(c.delta.mix.level.ltas_db.iter().all(|v| *v == 0.0));
+        assert!(c.delta.tracks.iter().all(|t| t.level.lufs_i == 0.0));
+    }
+
+    #[test]
+    fn activity_starts_where_the_track_starts_playing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = vec![0.0; SR as usize * 2];
+        s.extend(sine(440.0, -18.0, 3.0));
+        let (input, infos) = take(dir.path(), &[s]);
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let l = &m.tracks[0].level;
+        assert!(
+            (l.first_active_s.unwrap() - 2.0).abs() < 0.2,
+            "{:?}",
+            l.first_active_s
+        );
+        assert!(
+            (l.last_active_s.unwrap() - 5.0).abs() < 0.15,
+            "{:?}",
+            l.last_active_s
+        );
+        assert!(
+            (l.active_fraction - 0.6).abs() < 0.05,
+            "{}",
+            l.active_fraction
+        );
+    }
+
+    #[test]
+    fn post_fader_figures_follow_the_fader_and_pre_fader_ones_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(440.0, -20.0, 3.0), sine(880.0, -20.0, 3.0)],
+        );
+        let mut s = Session::from_track_info(&infos);
+        s.tracks[0].gain_db = -6.0;
+        s.tracks[1].muted = true;
+        let post = run(
+            &input,
+            &s,
+            &MeasureOptions {
+                tracks: TrackSelection::All,
+                ..Default::default()
+            },
+        );
+        let pre = run(
+            &input,
+            &s,
+            &MeasureOptions {
+                tracks: TrackSelection::All,
+                point: LevelPoint::PreFader,
+                ..Default::default()
+            },
+        );
+        assert!(
+            (pre.tracks[0].level.lufs_i - post.tracks[0].level.lufs_i - 6.0).abs() < 0.05 + 3.1
+        );
+        assert!(!post.tracks[1].in_mix);
+        assert!(
+            post.tracks[1].level.lufs_i.is_infinite(),
+            "muted contributes nothing"
+        );
+        assert!(post.tracks[1].masking.is_none());
+        assert!(
+            pre.tracks[1].level.lufs_i.is_finite(),
+            "but pre-fader it has signal"
+        );
+        // Selection "mix" leaves the muted track out entirely.
+        let mix = run(&input, &s, &MeasureOptions::default());
+        assert_eq!(mix.tracks.len(), 1);
+    }
+
+    #[test]
+    fn pairs_and_names_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[
+                sine(1000.0, -30.0, 2.0),
+                white(-3.0, 2.0, 1),
+                sine(200.0, -20.0, 2.0),
+            ],
+        );
+        let s = Session::from_track_info(&infos);
+        let pairs = MeasureOptions {
+            tracks: TrackSelection::Names(vec!["T1".into()]),
+            masking: MaskingMode::Pairs(vec!["T1".into(), "T2".into(), "T3".into()]),
+            ..Default::default()
+        };
+        let m = run(&input, &s, &pairs);
+        assert_eq!(m.pairs.len(), 6);
+        let t1_by_t2 = m
+            .pairs
+            .iter()
+            .find(|p| p.maskee == "T1" && p.masker == "T2")
+            .unwrap();
+        let t1_by_t3 = m
+            .pairs
+            .iter()
+            .find(|p| p.maskee == "T1" && p.masker == "T3")
+            .unwrap();
+        assert!(t1_by_t2.masked_fraction > t1_by_t3.masked_fraction);
+        assert_eq!(m.tracks.len(), 3, "pair tracks are measured too");
+
+        let bad = |opts: MeasureOptions| {
+            measure(
+                &input,
+                &[MeasureJob {
+                    tracks: &s.tracks,
+                    tags: &[],
+                    settings: &s.settings,
+                }],
+                &opts,
+                |_| {},
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(
+            bad(MeasureOptions {
+                tracks: TrackSelection::Names(vec!["Nope".into()]),
+                ..Default::default()
+            }),
+            EngineError::InvalidRequest(_)
+        ));
+        let many = (0..=MAX_PAIR_TRACKS).map(|i| format!("T{i}")).collect();
+        assert!(matches!(
+            bad(MeasureOptions {
+                masking: MaskingMode::Pairs(many),
+                ..Default::default()
+            }),
+            EngineError::InvalidRequest(_)
+        ));
+    }
+
+    #[test]
+    fn spreading_function_has_the_classic_slopes() {
+        assert!(spreading_db(0.0).abs() < 0.05);
+        // ≈ −10 dB/Bark towards higher bands, ≈ −25 dB/Bark towards lower.
+        // (asymptotes; at dz = ±4…5 the slopes are −9.6 and −24.4 dB/Bark).
+        assert!(((spreading_db(5.0) - spreading_db(4.0)) + 10.0).abs() < 1.0);
+        assert!(((spreading_db(-5.0) - spreading_db(-4.0)) + 25.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn tags_and_mixed_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(440.0, -20.0, 2.0)]);
+        let s = Session::from_track_info(&infos);
+        let tags = vec![vec!["gesang".to_string()]];
+        let m = measure(
+            &input,
+            &[MeasureJob {
+                tracks: &s.tracks,
+                tags: &tags,
+                settings: &s.settings,
+            }],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(m[0].tracks[0].tags, tags[0]);
+        let mut other = s.clone();
+        other.settings = RenderSettings {
+            trim_start_frame: 10,
+            ..RenderSettings::default()
+        };
+        assert!(measure(
+            &input,
+            &[
+                MeasureJob {
+                    tracks: &s.tracks,
+                    tags: &[],
+                    settings: &s.settings
+                },
+                MeasureJob {
+                    tracks: &other.tracks,
+                    tags: &[],
+                    settings: &other.settings
+                },
+            ],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .is_err());
+    }
+}

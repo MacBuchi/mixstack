@@ -10,6 +10,8 @@
 //! - how seconds become trim frames ([`apply_render_options`]),
 //! - which reference profile a template's mastering settings imply
 //!   ([`reference_profile`]),
+//! - measurement and comparison of mixes ([`measure_template`],
+//!   [`compare_templates`], over [`crate::measure`]),
 //! - and the render itself, which is [`render_io`] — the app's export — with
 //!   nothing in front of it but the safety checks of a tool that writes
 //!   files on someone's disk ([`render_session_to`]).
@@ -26,6 +28,10 @@ use serde::Serialize;
 use crate::error::EngineError;
 use crate::ixml::{self, TrackInfo};
 use crate::mastering::{merge_profiles, ReferenceProfile};
+use crate::measure::{
+    compare, measure, Comparison, MeasureJob, MeasureOptions, Measurement, COMPARE_SCHEMA,
+    MEASURE_SCHEMA,
+};
 use crate::reference::analyze_reference;
 use crate::render::{render_io, LoudnessMode, OutputFormat, RenderReport, RenderSettings};
 use crate::session::Session;
@@ -450,4 +456,152 @@ pub fn render_template(
         engine_version,
         progress,
     )
+}
+
+// ── measurement (#166) ──────────────────────────────────────────────────────
+
+fn measure_err(e: EngineError) -> HeadlessError {
+    match e {
+        EngineError::InvalidRequest(m) => HeadlessError::Usage(m),
+        other => HeadlessError::Engine(other),
+    }
+}
+
+/// The mix a measurement without `--mix` describes: a fresh session, every
+/// track in at unity — exactly what the app shows when a take is opened for
+/// the first time.
+pub fn fresh_template(take: &Take) -> Template {
+    Template::from_session(&Session::from_track_info(&take.tracks))
+}
+
+/// `mixstack.measure/1` as the CLI and the MCP server print it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MeasureOutput {
+    pub input: String,
+    #[serde(flatten)]
+    pub measurement: Measurement,
+    pub mapping: MappingReport,
+    pub engine: String,
+}
+
+/// `mixstack.compare/1` as the CLI and the MCP server print it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareOutput {
+    pub input: String,
+    #[serde(flatten)]
+    pub comparison: Comparison,
+    pub mapping_a: MappingReport,
+    pub mapping_b: MappingReport,
+    pub engine: String,
+}
+
+/// Measure applied sessions of one take in a single read. Only the range of
+/// `opts` matters (start/end); every session gets the same.
+pub fn measure_sessions(
+    take: &Take,
+    sessions: &[(&Session, &[Vec<String>])],
+    opts: &RenderOptions,
+    mopts: &MeasureOptions,
+    progress: impl FnMut(f32),
+) -> Result<Vec<Measurement>> {
+    let mut settings = Vec::with_capacity(sessions.len());
+    for (s, _) in sessions {
+        let mut st = s.settings.clone();
+        let range_only = RenderOptions {
+            start_seconds: opts.start_seconds,
+            end_seconds: opts.end_seconds,
+            ..RenderOptions::default()
+        };
+        apply_render_options(&mut st, take, &range_only)?;
+        // Keep the mix's own loudness setting for the predicted gain.
+        st.loudness = s.settings.loudness;
+        settings.push(st);
+    }
+    let jobs: Vec<MeasureJob> = sessions
+        .iter()
+        .zip(&settings)
+        .map(|((s, tags), st)| MeasureJob {
+            tracks: &s.tracks,
+            tags,
+            settings: st,
+        })
+        .collect();
+    measure(
+        &InputHandle::Path(take.path.to_string_lossy().into_owned()),
+        &jobs,
+        mopts,
+        progress,
+    )
+    .map_err(|e| match e {
+        EngineError::Io(_) | EngineError::NotWav => input_err(&take.path, e),
+        other => measure_err(other),
+    })
+}
+
+fn applied_for(template: &Template, take: &Take, opts: &RenderOptions) -> Result<AppliedTemplate> {
+    let applied = apply_template(template, &take.tracks, opts.unknown);
+    if applied.report.matched_nothing() {
+        return Err(HeadlessError::NoMatch(take.path.display().to_string()));
+    }
+    Ok(applied)
+}
+
+/// Measure `template` applied to `take` over the range in `opts`.
+pub fn measure_template(
+    take: &Take,
+    template: &Template,
+    opts: &RenderOptions,
+    mopts: &MeasureOptions,
+    engine_version: &str,
+    progress: impl FnMut(f32),
+) -> Result<MeasureOutput> {
+    let applied = applied_for(template, take, opts)?;
+    let mut m = measure_sessions(
+        take,
+        &[(&applied.session, &applied.tags)],
+        opts,
+        mopts,
+        progress,
+    )?;
+    let measurement = m.remove(0);
+    debug_assert_eq!(measurement.schema, MEASURE_SCHEMA);
+    Ok(MeasureOutput {
+        input: take.path.display().to_string(),
+        measurement,
+        mapping: applied.report,
+        engine: engine_version.to_string(),
+    })
+}
+
+/// Measure two templates on the same take and range — one read of the file
+/// for both — and report `b − a`.
+pub fn compare_templates(
+    take: &Take,
+    a: &Template,
+    b: &Template,
+    opts: &RenderOptions,
+    mopts: &MeasureOptions,
+    engine_version: &str,
+    progress: impl FnMut(f32),
+) -> Result<CompareOutput> {
+    let aa = applied_for(a, take, opts)?;
+    let bb = applied_for(b, take, opts)?;
+    let mut m = measure_sessions(
+        take,
+        &[(&aa.session, &aa.tags), (&bb.session, &bb.tags)],
+        opts,
+        mopts,
+        progress,
+    )?
+    .into_iter();
+    let (ma, mb) = (m.next().unwrap(), m.next().unwrap());
+    let comparison = compare(ma, mb).map_err(measure_err)?;
+    debug_assert_eq!(comparison.schema, COMPARE_SCHEMA);
+    Ok(CompareOutput {
+        input: take.path.display().to_string(),
+        comparison,
+        mapping_a: aa.report,
+        mapping_b: bb.report,
+        engine: engine_version.to_string(),
+    })
 }

@@ -13,6 +13,7 @@ pub mod error;
 pub mod headless;
 pub mod ixml;
 pub mod mastering;
+pub mod measure;
 pub mod mix;
 #[cfg(feature = "mp3-any")]
 pub mod mp3;
