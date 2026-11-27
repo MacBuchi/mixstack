@@ -139,6 +139,7 @@ pub const THIRD_OCTAVE_NOMINAL_HZ: [f64; 30] = [
 
 /// Which tracks get per-track figures.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum TrackSelection {
     /// The audible ones (in the mix, not muted, not soloed away).
@@ -150,6 +151,7 @@ pub enum TrackSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum MaskingMode {
     Off,
@@ -161,6 +163,7 @@ pub enum MaskingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LevelPoint {
     #[default]
@@ -187,27 +190,38 @@ pub struct MeasureJob<'a> {
 // ── results ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Percentiles {
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub p10: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub p50: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub p95: f64,
 }
 
 /// What is measured on any signal, mix or track. Non-finite values (the
 /// loudness of silence) serialise as `null`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LevelMetrics {
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub lufs_i: f64,
     pub lra: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub true_peak_dbtp: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub sample_peak_dbfs: f64,
     /// Peak-to-loudness ratio: true peak − LUFS-I.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub plr_db: f64,
     /// Sample peak − RMS, both in dBFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub crest_db: f64,
     /// Percentiles of short-term (3 s) loudness above −70 LUFS.
     pub short_term_lufs: Percentiles,
     /// Long-term average spectrum per band, AES17 dBFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<Option<f64>>"))]
     pub ltas_db: Vec<f64>,
     pub active_fraction: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,14 +231,19 @@ pub struct LevelMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MixMetrics {
     #[serde(flatten)]
     pub level: LevelMetrics,
     /// Phase correlation over the range, −1..+1.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub correlation: f64,
     /// RMS(side) / RMS(mid): 0 for mono, 1 for two uncorrelated channels.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub width: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<Option<f64>>"))]
     pub correlation_bands: Vec<f64>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<Option<f64>>"))]
     pub width_bands: Vec<f64>,
     /// The gain the render's normalisation would apply to this mix (without
     /// fades, which the measurement leaves out), from the one
@@ -234,6 +253,7 @@ pub struct MixMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MaskingMetrics {
     /// Mean masker-to-signal ratio per band over the frames where the track
     /// has signal in it; `null` where it never does. > 0 dB = masked.
@@ -241,12 +261,15 @@ pub struct MaskingMetrics {
     /// Share of those frames in which the band is masked.
     pub masked_time_fraction: Vec<Option<f64>>,
     /// Share of all counted (frame, band) cells that are masked.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub masked_fraction: f64,
     /// Ma et al.'s Mₙ (eq. 11), averaged over the counted frames.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub m_index: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrackMetrics {
     pub index: u32,
     pub name: String,
@@ -261,14 +284,18 @@ pub struct TrackMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PairMasking {
     pub maskee: String,
     pub masker: String,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub masked_fraction: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub m_index: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Range {
     pub start: f64,
     pub end: f64,
@@ -277,6 +304,7 @@ pub struct Range {
 /// `mixstack.measure/1`, minus the fields only a front end knows (input
 /// path, engine version), which the caller adds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Measurement {
     pub schema: String,
     pub range: Range,
@@ -1349,26 +1377,38 @@ pub fn measure(
 
 /// `b − a` for every scalar and band value; `null` where either side is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LevelDelta {
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub lufs_i: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub lra: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub true_peak_dbtp: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub plr_db: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub crest_db: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub short_term_p50: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<Option<f64>>"))]
     pub ltas_db: Vec<f64>,
     pub active_fraction: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MaskingDelta {
     pub msr_db: Vec<Option<f64>>,
     pub masked_time_fraction: Vec<Option<f64>>,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub masked_fraction: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub m_index: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrackDelta {
     pub index: u32,
     pub name: String,
@@ -1379,14 +1419,18 @@ pub struct TrackDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MixDelta {
     #[serde(flatten)]
     pub level: LevelDelta,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub correlation: f64,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub width: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Comparison {
     pub schema: String,
     pub range: Range,
@@ -1397,6 +1441,7 @@ pub struct Comparison {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ComparisonDelta {
     pub mix: MixDelta,
     /// Tracks measured in both, matched by interleave index.

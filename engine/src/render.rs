@@ -23,6 +23,7 @@ use crate::wav::{InputHandle, WavReader};
 pub const BLOCK_FRAMES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum LoudnessMode {
     /// No normalisation. If the limiter is also disabled, gain is still
     /// reduced when the mix would clip; with the limiter on, overs are its job.
@@ -35,6 +36,7 @@ pub enum LoudnessMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum OutputFormat {
     Wav16,
     Wav24,
@@ -85,6 +87,7 @@ pub const MP3_CBR_KBPS: [u32; 8] = [96, 112, 128, 160, 192, 224, 256, 320];
 
 /// One chosen reference track (path + display name for the UI).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MasteringReference {
     pub path: String,
     pub name: String,
@@ -97,6 +100,7 @@ pub struct MasteringReference {
 /// pair; v4 stores the `references` list (multi-reference genre curves) and
 /// keeps the legacy fields mirrored to the first entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MasteringSettings {
     pub enabled: bool,
     #[serde(default)]
@@ -124,6 +128,7 @@ impl MasteringSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RenderSettings {
     pub loudness: LoudnessMode,
     pub format: OutputFormat,
@@ -221,20 +226,26 @@ impl FadeEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RenderReport {
     /// Sample peak of the raw (pre-normalisation) mix, in dBFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub peak_dbfs_before: f64,
     /// Gain applied by the normalisation stage, in dB.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub gain_applied_db: f64,
     pub duration_seconds: f64,
     pub sample_rate: u32,
     /// Integrated loudness of the delivered file (post-limiter), LUFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub integrated_lufs: f64,
     /// True peak of the delivered file (post-limiter), dBTP.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub true_peak_dbtp: f64,
     /// Loudness range of the delivered file, LU.
     pub lra_lu: f64,
     /// Integrated loudness of the source mix (pre-gain), LUFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub source_integrated_lufs: f64,
     /// Whether reference mastering was applied to this render.
     #[serde(default)]

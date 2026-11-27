@@ -9,6 +9,7 @@ use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrackInfo {
     /// 1-based interleave index (channel position in the WAV file).
     pub index: u32,
