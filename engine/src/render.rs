@@ -186,7 +186,7 @@ impl FadeEnvelope {
         if !self.is_active() {
             return;
         }
-        for (i, fr) in stereo.chunks_exact_mut(2).enumerate() {
+        for (i, fr) in stereo.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let pos = block_start + i as u64;
             let mut g = 1.0;
             if pos < self.fade_in_frames {

@@ -295,31 +295,31 @@ impl FrameDecoder {
 pub fn decode_samples(spec: &WavSpec, raw: &[u8], out: &mut Vec<f64>) -> Result<()> {
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {
-            for c in raw.chunks_exact(2) {
+            for c in raw.as_chunks::<2>().0 {
                 let v = i16::from_le_bytes([c[0], c[1]]);
                 out.push(v as f64 / 32768.0);
             }
         }
         (SampleFormat::Int, 24) => {
-            for c in raw.chunks_exact(3) {
+            for c in raw.as_chunks::<3>().0 {
                 let v = i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8;
                 out.push(v as f64 / 8_388_608.0);
             }
         }
         (SampleFormat::Int, 32) => {
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 let v = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 out.push(v as f64 / 2_147_483_648.0);
             }
         }
         (SampleFormat::Float, 32) => {
-            for c in raw.chunks_exact(4) {
+            for c in raw.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64);
             }
         }
         (SampleFormat::Float, 64) => {
-            for c in raw.chunks_exact(8) {
-                out.push(f64::from_le_bytes(c.try_into().unwrap()));
+            for c in raw.as_chunks::<8>().0 {
+                out.push(f64::from_le_bytes(*c));
             }
         }
         (f, b) => {

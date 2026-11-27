@@ -121,7 +121,7 @@ impl MsFirStage {
     /// first calls emit fewer frames while the group delay primes).
     pub fn process(&mut self, stereo_in: &[f64], out: &mut Vec<f64>) {
         debug_assert_eq!(stereo_in.len() % 2, 0);
-        for fr in stereo_in.chunks_exact(2) {
+        for fr in stereo_in.as_chunks::<2>().0 {
             let (l, r) = (fr[0], fr[1]);
             self.mid_in.push((l + r) * 0.5);
             self.side_in.push((l - r) * 0.5);

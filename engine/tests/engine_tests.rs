@@ -415,7 +415,7 @@ fn chain_state_adoption_is_click_free() {
     // samples of a 60 Hz sine at 44.1 kHz can never jump by more than ~0.02
     // plus what the 0.5 dB coefficient step explains.
     let mut prev = out_a[out_a.len() - 2]; // left channel, last frame
-    for fr in out_b.chunks_exact(2) {
+    for fr in out_b.as_chunks::<2>().0 {
         assert!(
             (fr[0] - prev).abs() < 0.05,
             "click at parameter swap: {} -> {}",
@@ -520,7 +520,9 @@ fn limiter_output_is_sample_aligned_and_length_preserving() {
     lim.flush(&mut out);
     assert_eq!(out.len(), input.len());
     let (pos, _) = out
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .max_by(|a, b| a.1[0].abs().partial_cmp(&b.1[0].abs()).unwrap())
         .unwrap();
@@ -1499,7 +1501,9 @@ fn direct_ms_conv(stereo: &[f64], fir_mid: &[f64], fir_side: &[f64]) -> Vec<f64>
         }
     };
     let ms: Vec<(f64, f64)> = stereo
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|fr| ((fr[0] + fr[1]) * 0.5, (fr[0] - fr[1]) * 0.5))
         .collect();
     let mut out = Vec::with_capacity(stereo.len());
@@ -1538,7 +1542,7 @@ fn fir_stage_impulse_reproduces_taps() {
     assert_eq!(out.len(), input.len());
     // Identical mid/side filters act per-channel: out_l[n] = taps[n + latency].
     let latency = stage.latency_frames();
-    for (n, fr) in out.chunks_exact(2).enumerate() {
+    for (n, fr) in out.as_chunks::<2>().0.iter().enumerate() {
         let expected = taps.get(n + latency).copied().unwrap_or(0.0);
         assert!(
             (fr[0] - expected).abs() < 1e-12,
@@ -1697,7 +1701,7 @@ fn mastering_matches_reference_tone_level_and_width() {
     let mut reference = ms_noise(frames, 0.15, 0.06, 20);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -2048,7 +2052,7 @@ fn render_with_reference_masters_the_mix() {
     let mut reference = ms_noise(20 * sr as usize, 0.15, 0.06, 81);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -2968,7 +2972,14 @@ fn the_start_ramp_eases_in_after_start_and_seek_but_not_after_rewind() {
         (mid - steady * 0.5).abs() < 1e-6,
         "ramp midpoint reads {mid}, expected half of {steady}"
     );
-    for (i, fr) in out.chunks_exact(2).take(ramp / 2).enumerate().skip(1) {
+    for (i, fr) in out
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(ramp / 2)
+        .enumerate()
+        .skip(1)
+    {
         let prev = out[(i - 1) * 2];
         assert!(
             fr[0] >= prev,
@@ -3544,7 +3555,7 @@ fn byte_driven_render_matches_the_file_render_with_a_mastering_plan() {
     let mut reference = ms_noise(8 * sr as usize, 0.15, 0.07, 94);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -3728,7 +3739,7 @@ fn a_muted_track_keeps_reading_but_a_silent_channel_does_not() {
     }
     let mixed = stage.process(&block).to_vec();
     let expected = 0.4 * std::f64::consts::FRAC_1_SQRT_2; // centre pan, -3 dB
-    for fr in mixed.chunks_exact(2) {
+    for fr in mixed.as_chunks::<2>().0 {
         assert!((fr[0] as f64 - expected).abs() < 1e-6, "muted audio leaked");
     }
 }
@@ -3906,7 +3917,7 @@ fn a_two_hundred_channel_take_mixes_and_meters_correctly() {
         .filter(|(i, _)| i % 4 == 0)
         .map(|(_, v)| v * std::f64::consts::FRAC_1_SQRT_2)
         .sum();
-    for fr in out.chunks_exact(2) {
+    for fr in out.as_chunks::<2>().0 {
         assert!(
             (fr[0] as f64 - expected).abs() < 1e-4,
             "mixed {} instead of {expected}",

@@ -216,7 +216,7 @@ impl PreviewStage {
             // the ramp's last sample on — the preview-equals-render
             // invariant stays checkable — and a gain that only attenuates
             // cannot lift anything over the limiter's ceiling.
-            for fr in block.chunks_exact(2) {
+            for fr in block.as_chunks::<2>().0 {
                 let g = if self.ramp_pos < self.ramp_len {
                     let x = self.ramp_pos as f64 / self.ramp_len as f64;
                     0.5 - 0.5 * (std::f64::consts::PI * x).cos()
@@ -266,7 +266,7 @@ impl PreviewStage {
         let mut sum_ll = 0.0f64;
         let mut sum_rr = 0.0f64;
         let mut sum_lr = 0.0f64;
-        for fr in self.out.chunks_exact(2) {
+        for fr in self.out.as_chunks::<2>().0 {
             let (l, r) = (fr[0], fr[1]);
             peak_l = peak_l.max(l.abs());
             peak_r = peak_r.max(r.abs());
