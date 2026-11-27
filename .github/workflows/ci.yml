@@ -102,7 +102,7 @@ jobs:
       matrix:
         include:
           - name: macOS
-            os: macos-14
+            os: macos-15
             build: flutter build macos --debug
           - name: Windows
             os: windows-latest
@@ -116,7 +116,7 @@ jobs:
             # only after tagging (or worse, only in a Play review).
             build: flutter build apk --debug --flavor play
           - name: iOS
-            os: macos-14
+            os: macos-15
             build: flutter build ios --debug --no-codesign
           # The web bundle broke in a way nothing here could see: `flutter
           # analyze` passes on a `dart:io` import that a web-reachable file

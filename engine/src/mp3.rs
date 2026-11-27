@@ -87,7 +87,7 @@ impl<W: Write> Mp3Writer<W> {
     pub(crate) fn write_block(&mut self, stereo: &[f64]) -> Result<()> {
         self.left.clear();
         self.right.clear();
-        for fr in stereo.chunks_exact(2) {
+        for fr in stereo.as_chunks::<2>().0 {
             self.left.push(fr[0].clamp(-1.0, 1.0));
             self.right.push(fr[1].clamp(-1.0, 1.0));
         }

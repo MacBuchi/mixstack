@@ -95,6 +95,12 @@ Natively the values travel as a `Vec<AtomicU32>` so the decode thread still neve
 - **A browser cannot write into a folder**, so the multi-file export downloads each finished mixdown instead — `MultiExportRunner.run` takes a *nullable* folder, and null is the browser's mode rather than a missing argument. Per file as it finishes, not one archive at the end: a cancelled run keeps what it produced, and nothing has to be held in memory while the rest renders.
 - **MP3 exists on web, from a different encoder.** LAME is C and `wasm32-unknown-unknown` has no libc, so the browser encodes with Shine (`shine-rs`, Cargo feature `mp3-shine`); `engine/src/mp3.rs` holds both behind one `Mp3Writer` and prefers LAME wherever it builds, so a native build can never ship the lesser encoder. Shine has no psychoacoustic model — the difference is named in the UI (`mp3EncoderNote`), never papered over, and the MP3 test tolerances are per-encoder rather than loosened. Still absent on web: anything needing a target folder.
 
+## Headless engine: templates, CLI, measurement, MCP (#163)
+
+Phase 6/7 of the band player (MacBuchi/bandplayer#8, #22) drives the engine without the app. Four public, versioned contracts; the band player checks the version, so a breaking change means a new major, never an edit in place.
+
+- **`mixstack.mix/1` — mix templates (#164, `engine/src/template.rs`, contract in `docs/TEMPLATE.md`).** A session minus everything per-render (trim, fades, format, dither), plus free `tags` per track. `apply_template` maps onto a take in three rounds — exact name, normalised name (case + whitespace only), index — each template track used at most once, and returns a `MappingReport` (`matched` with `by`, `unknown`, `missing`) instead of logging. Unknown tracks are the caller's rule; `UnknownTracks::Exclude` is the default because a new channel is as likely a monitor feed as a source. **Tags are data, never logic** — the engine reads nothing out of names or tags (the `Session::from_track_info` rule), and there is no fuzzy matching on purpose: a wrong match moves the wrong fader silently. Hash lookups per round keep it linear (`mapping_is_linear_in_the_channel_count`, 4000 renamed tracks). Tags live beside the session (`AppliedTemplate::tags`) because `Session` has no field for them and must not grow one for data it never reads.
+
 ## Errors, logging and what a bug report carries
 
 `lib/state/debug_log.dart` is the app's **one** logger plus a 200-entry ring buffer; `main.dart` installs `FlutterError.onError` and `PlatformDispatcher.instance.onError` before anything else can fail. Until v0.18.0 there was none of this, and it cost a real diagnosis: when the app vanished on the iPad after eight minutes, nothing distinguished a system kill from a crash.
@@ -251,7 +257,7 @@ xcrun devicectl device process launch --device <udid> --console de.macbuchi.dure
 
 ## Testing
 
-Rust carries the correctness load (107 engine tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
+Rust carries the correctness load (126 engine tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
 
 - `flutter analyze` + `flutter test` after every change; the macOS integration test (`flutter test integration_test -d macos`) is the flow guard and runs in CI.
 - **Keep the integration test in ONE file** — several app launches per run are flaky on macOS. Build synthetic fixtures inline (the doc fixture WAV with iXML), never the user's multi-GB recordings. Network stays off.

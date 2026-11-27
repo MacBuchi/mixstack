@@ -22,6 +22,7 @@ pub mod reference;
 pub mod render;
 pub mod session;
 pub mod sink;
+pub mod template;
 pub mod wav;
 
 pub use error::{EngineError, Result};
