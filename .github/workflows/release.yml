@@ -164,9 +164,48 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # The headless `mixstack` CLI (#165) for the band player's Mac. Unsigned
+  # like the app until the signing question is decided; arm64 only, because
+  # that is the one machine it runs on. Built straight from cargo — no
+  # Flutter involved, and the engine is built without `playback` (no cpal).
+  cli:
+    name: Build CLI (macOS arm64)
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p mixstack-cli --release --locked
+      - name: Check the binary reports this release
+        run: |
+          line="$(target/release/mixstack --version)"
+          echo "$line"
+          case "$line" in
+            "mixstack ${TAG#v} "*) ;;
+            *) echo "::error::mixstack --version does not report $TAG"; exit 1 ;;
+          esac
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+      # Licence texts travel with the binary: the notices asset covers every
+      # crate of the workspace, the CLI's included.
+      - name: Package
+        run: |
+          mkdir -p pkg
+          cp target/release/mixstack LICENSE pkg/
+          cp assets/licenses/rust-third-party.txt pkg/THIRD-PARTY-NOTICES.txt
+          ditto -c -k pkg mixstack-cli-${{ needs.version.outputs.tag }}-macos-arm64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-macos
+          path: mixstack-cli-${{ needs.version.outputs.tag }}-macos-arm64.zip
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: [version, build]
+    needs: [version, build, cli]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15

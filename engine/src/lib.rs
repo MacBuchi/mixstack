@@ -10,6 +10,7 @@ pub mod analysis;
 pub mod chain;
 pub mod dsp;
 pub mod error;
+pub mod headless;
 pub mod ixml;
 pub mod mastering;
 pub mod mix;

@@ -1843,6 +1843,7 @@ fn write_ref_fixture(path: &std::path::Path, format: OutputFormat, stereo: &[f64
         &OutputHandle::Path(path.to_str().unwrap().into()),
         format,
         sr,
+        320,
     )
     .unwrap();
     for chunk in stereo.chunks(2 * 65_536) {
@@ -2578,7 +2579,13 @@ fn render_streamed(
         settings,
         &measured,
         plan,
-        StereoSink::new(sink.clone(), settings.format, spec.sample_rate).unwrap(),
+        StereoSink::new(
+            sink.clone(),
+            settings.format,
+            spec.sample_rate,
+            settings.mp3_bitrate_kbps,
+        )
+        .unwrap(),
     )
     .unwrap();
     let mut reader = input.open().unwrap();
@@ -4217,5 +4224,191 @@ mod template_tests {
             .matched
             .iter()
             .all(|m| m.by == MatchedBy::Index));
+    }
+}
+
+// ── headless entry points (#165) ────────────────────────────────────────────
+
+mod headless_tests {
+    use super::{wav16, DUREC_IXML};
+    use durecmix_engine::headless::{
+        self, apply_render_options, open_take, prepare_session, render_template, seconds_to_frame,
+        HeadlessError, RenderOptions,
+    };
+    use durecmix_engine::ixml::tracks_or_channels;
+    use durecmix_engine::render::{
+        render_to_file, LoudnessMode, OutputFormat, RenderSettings, MP3_CBR_KBPS,
+    };
+    use durecmix_engine::session::Session;
+    use durecmix_engine::sink::validate_format;
+    use durecmix_engine::template::{Template, UnknownTracks};
+
+    /// 3-channel 48 kHz take, 2 s, the DUREC iXML (Vocals, Drums OH L/R).
+    fn take_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let frames = 96_000;
+        let mut samples = Vec::with_capacity(frames * 3);
+        for n in 0..frames {
+            let t = n as f64 / 48_000.0;
+            for (ch, f) in [440.0, 97.0, 1500.0].iter().enumerate() {
+                let a = [0.3, 0.2, 0.1][ch];
+                samples.push((a * (std::f64::consts::TAU * f * t).sin() * 32767.0) as i16);
+            }
+        }
+        let p = dir.join("take.wav");
+        std::fs::write(&p, wav16(3, 48_000, &samples, Some(DUREC_IXML))).unwrap();
+        p
+    }
+
+    #[test]
+    fn take_without_ixml_gets_one_track_per_channel() {
+        let t = tracks_or_channels(None, 3);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[2].name, "Channel 3");
+        assert_eq!(t[2].index, 3);
+        assert_eq!(tracks_or_channels(Some(DUREC_IXML), 3)[0].name, "Vocals");
+        assert_eq!(
+            tracks_or_channels(Some("<?xml garbage"), 2)[1].name,
+            "Channel 2"
+        );
+    }
+
+    #[test]
+    fn seconds_round_to_the_nearest_frame() {
+        assert_eq!(seconds_to_frame(2.8, 44_100), 123_480);
+        assert_eq!(seconds_to_frame(1.0 / 44_100.0 * 0.6, 44_100), 1);
+        assert_eq!(seconds_to_frame(0.0, 48_000), 0);
+    }
+
+    #[test]
+    fn render_options_become_trim_frames_and_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let take = open_take(&take_file(dir.path())).unwrap();
+        let mut s = RenderSettings::default();
+        let opts = RenderOptions {
+            start_seconds: Some(0.25),
+            end_seconds: Some(99.0),
+            fade_in_ms: 10.0,
+            loudness: Some(LoudnessMode::LufsIntegrated(-14.0)),
+            ..RenderOptions::default()
+        };
+        apply_render_options(&mut s, &take, &opts).unwrap();
+        assert_eq!(s.trim_start_frame, 12_000);
+        assert_eq!(
+            s.trim_end_frame, None,
+            "an end past the take is the take's end"
+        );
+        assert_eq!(s.loudness, LoudnessMode::LufsIntegrated(-14.0));
+        for bad in [
+            RenderOptions {
+                start_seconds: Some(2.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                start_seconds: Some(-1.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                start_seconds: Some(1.0),
+                end_seconds: Some(1.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                fade_out_ms: f64::NAN,
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                format: OutputFormat::Mp3,
+                mp3_bitrate_kbps: 100,
+                ..RenderOptions::default()
+            },
+        ] {
+            let err =
+                apply_render_options(&mut RenderSettings::default(), &take, &bad).unwrap_err();
+            assert!(matches!(err, HeadlessError::Usage(_)), "{bad:?} → {err:?}");
+        }
+    }
+
+    #[test]
+    fn template_to_session_to_render_equals_rendering_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = take_file(dir.path());
+        let take = open_take(&wav).unwrap();
+        let mut session = Session::from_track_info(&take.tracks);
+        session.tracks[0].gain_db = -2.0;
+        session.tracks[0].eq.hpf_enabled = true;
+        session.tracks[2].pan = 0.3;
+        session.settings.loudness = LoudnessMode::LufsIntegrated(-18.0);
+
+        let opts = RenderOptions {
+            start_seconds: Some(0.1),
+            end_seconds: Some(1.9),
+            fade_out_ms: 200.0,
+            format: OutputFormat::Flac24,
+            ..RenderOptions::default()
+        };
+        let via_template = dir.path().join("t.flac");
+        let out = render_template(
+            &take,
+            &Template::from_session(&session),
+            &opts,
+            &via_template,
+            false,
+            "test",
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(out.schema, headless::RENDER_SCHEMA);
+
+        let mut direct = session.clone();
+        apply_render_options(&mut direct.settings, &take, &opts).unwrap();
+        let direct_path = dir.path().join("d.flac");
+        render_to_file(&wav, &direct.tracks, &direct.settings, &direct_path, |_| {}).unwrap();
+        assert_eq!(
+            std::fs::read(via_template).unwrap(),
+            std::fs::read(direct_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_template_matching_nothing_is_refused_before_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let take = open_take(&take_file(dir.path())).unwrap();
+        let t = Template::from_json(r#"{"schema":"mixstack.mix/1","tracks":[{"name":"Tuba"}]}"#)
+            .unwrap();
+        let err = prepare_session(&t, &take, &RenderOptions::default()).unwrap_err();
+        assert!(matches!(err, HeadlessError::NoMatch(_)));
+        // …unless the caller asks for unknown tracks to be included, which
+        // still matches nothing: the refusal is about the template.
+        let opts = RenderOptions {
+            unknown: UnknownTracks::Include,
+            ..RenderOptions::default()
+        };
+        assert!(matches!(
+            prepare_session(&t, &take, &opts),
+            Err(HeadlessError::NoMatch(_))
+        ));
+    }
+
+    #[test]
+    fn mp3_bitrates_outside_the_cbr_set_are_refused() {
+        for kbps in MP3_CBR_KBPS {
+            validate_format(OutputFormat::Mp3, 44_100, kbps).unwrap();
+        }
+        assert!(validate_format(OutputFormat::Mp3, 44_100, 100).is_err());
+        assert!(validate_format(OutputFormat::Mp3, 44_100, 0).is_err());
+        // Ignored for every other format.
+        validate_format(OutputFormat::Wav24, 44_100, 0).unwrap();
+    }
+
+    #[test]
+    fn sessions_from_before_the_bitrate_field_keep_320() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&Session::default().to_json().unwrap()).unwrap();
+        v["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mp3_bitrate_kbps");
+        let s: Session = serde_json::from_value(v).unwrap();
+        assert_eq!(s.settings.mp3_bitrate_kbps, 320);
     }
 }

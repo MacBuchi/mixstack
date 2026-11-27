@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rust", "engine"]
+members = ["rust", "engine", "cli"]
 
 [profile.release]
 lto = "thin"
