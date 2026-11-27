@@ -74,7 +74,7 @@ jobs:
       matrix:
         include:
           - name: macOS
-            os: macos-14
+            os: macos-15
             build: flutter build macos --release --dart-define=DURECMIX_FEEDBACK_TOKEN=$DURECMIX_FEEDBACK_TOKEN
             package: ditto -c -k --keepParent build/macos/Build/Products/Release/Mixstack.app mixstack-${{ needs.version.outputs.tag }}-macos.zip
             artifact: mixstack-${{ needs.version.outputs.tag }}-macos.zip
