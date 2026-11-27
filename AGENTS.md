@@ -11,6 +11,7 @@ Cross-project guidelines (architecture, state, testing, CI, signing, in-app upda
 ```
 engine/          Pure Rust DSP + file I/O — no FFI, no GUI, fully unit-tested
 rust/            flutter_rust_bridge API layer — thin DTO conversion ONLY, no logic
+cli/             `mixstack` binary (headless) — argument/JSON translation ONLY, no logic
 lib/             Flutter app (UI, state, platform file access)
 rust_builder/    cargokit glue (generated, don't touch)
 ```
@@ -34,6 +35,9 @@ flutter run -d macos                            # run the app
 cargo run -p durecmix-engine --release --example render_demo <in.wav> <out.wav>
 cargo run -p durecmix-engine --release --example play_demo <in.wav> [start_s]
 ./tool/build_web_engine.sh && flutter build web  # the PWA (see "The PWA")
+cargo install --path cli                          # the headless `mixstack` CLI (see "Headless engine")
+mixstack probe <in.wav> --json
+mixstack render <in.wav> --mix <template|session.json> --out <out.wav|flac|mp3> [--start s] [--end s] [--json]
 ```
 
 Rust toolchain: rustup at `~/.cargo` (needs `source ~/.cargo/env` in fresh shells). Flutter SDK: `/Volumes/MacStore/Programming/Flutter/SDK/flutter`. `gh` CLI is installed and authenticated — use it for CI status (`gh run list`, `gh run view`), issues and PRs.
@@ -100,6 +104,14 @@ Natively the values travel as a `Vec<AtomicU32>` so the decode thread still neve
 Phase 6/7 of the band player (MacBuchi/bandplayer#8, #22) drives the engine without the app. Four public, versioned contracts; the band player checks the version, so a breaking change means a new major, never an edit in place.
 
 - **`mixstack.mix/1` — mix templates (#164, `engine/src/template.rs`, contract in `docs/TEMPLATE.md`).** A session minus everything per-render (trim, fades, format, dither), plus free `tags` per track. `apply_template` maps onto a take in three rounds — exact name, normalised name (case + whitespace only), index — each template track used at most once, and returns a `MappingReport` (`matched` with `by`, `unknown`, `missing`) instead of logging. Unknown tracks are the caller's rule; `UnknownTracks::Exclude` is the default because a new channel is as likely a monitor feed as a source. **Tags are data, never logic** — the engine reads nothing out of names or tags (the `Session::from_track_info` rule), and there is no fuzzy matching on purpose: a wrong match moves the wrong fader silently. Hash lookups per round keep it linear (`mapping_is_linear_in_the_channel_count`, 4000 renamed tracks). Tags live beside the session (`AppliedTemplate::tags`) because `Session` has no field for them and must not grow one for data it never reads.
+- **`mixstack probe|render` — the CLI (#165, `cli/`, logic in `engine/src/headless.rs`).** `cli/` depends only on the engine (`default-features = false, features = ["mp3"]` — no cpal) and translates; `headless` owns the track list (`ixml::tracks_or_channels`, now also what the bridge uses), seconds → frames (`seconds_to_frame`, rounded), range validation, the reference profile a template's mastering implies, and the render, which **is** `render_io` — the app's export. The proof is byte equality: `cli_render_is_bit_identical_to_the_app_export` (CLI vs `render_to_file`, EQ + trim + fades + LUFS) and `template_to_session_to_render_equals_rendering_the_session`. Contract:
+  - stdout: exactly one JSON document with `--json` (`mixstack.probe/1`, `mixstack.render/1`, or `mixstack.error/1` with `code`/`kind`/`message` on failure); text otherwise. stderr: progress as JSON lines `{"progress":0.42,"pass":2}` (overall 0..1, one per percent; `--quiet` silences them) and human-readable errors.
+  - Exit codes: `0` ok · `1` render failed · `2` usage (clap's own and the engine's range/bitrate checks) · `3` input unreadable (take, mix or mastering reference) · `4` the mix matches no track · `5` output not writable (exists without `--force`, is the source, no such directory). Partial mapping is not an error — it is in the report.
+  - Output is written to a hidden `.<name>.partial` beside the target and renamed when complete, so a consumer never sees a truncated file under the final name. The source is never written; an `--out` that canonicalises to it is refused even with `--force`.
+  - Format from the extension (`.wav` = 24-bit, `.flac` = 24-bit, `.mp3`) unless `--format`. **MP3 is always CBR** (`RenderSettings::mp3_bitrate_kbps`, default 320, set `MP3_CBR_KBPS`; LAME's VBR mode is switched off explicitly) — browsers derive an MP3's duration and seek positions from the first frame's bitrate, and the band player streams 128 kbps to browsers. A session without the field loads as 320.
+  - `mixstack --version` prints `mixstack <release> mixstack.mix/1 mixstack.probe/1 mixstack.render/1`; the release comes from `pubspec.yaml` via `cli/build.rs`, so CLI and app from one commit name the same version. The `release.yml` job `cli` checks that and ships `mixstack-cli-<tag>-macos-arm64.zip` (unsigned, with LICENSE and the crate notices).
+  - Measured 2026-11-27 on the user's Mac (release build): UFX33 (34 ch, 24-bit/44.1 kHz), 117 s range, template on 4 tracks, MP3 128 kbps → 5.4 s wall, −16.00 LUFS-I hit exactly.
+  - The crate-notice asset (`tool/gen_rust_licenses.py`) is workspace-wide, so it now lists the CLI's crates (clap) too — over-inclusive for the app, exactly right for the CLI zip that carries the same file.
 
 ## Errors, logging and what a bug report carries
 
@@ -257,7 +269,7 @@ xcrun devicectl device process launch --device <udid> --console de.macbuchi.dure
 
 ## Testing
 
-Rust carries the correctness load (126 engine tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
+Rust carries the correctness load (133 engine tests + 8 CLI tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
 
 - `flutter analyze` + `flutter test` after every change; the macOS integration test (`flutter test integration_test -d macos`) is the flow guard and runs in CI.
 - **Keep the integration test in ONE file** — several app launches per run are flaky on macOS. Build synthetic fixtures inline (the doc fixture WAV with iXML), never the user's multi-GB recordings. Network stays off.

@@ -314,6 +314,9 @@ fn to_engine_settings(m: &ApiMaster) -> RenderSettings {
                     .collect(),
             }
         }),
+        // Settings the app does not expose (the MP3 bitrate) keep the
+        // engine's defaults.
+        ..RenderSettings::default()
     }
 }
 
@@ -466,18 +469,7 @@ pub fn load_recording(
         .with_context(|| format!("open {path}"))?;
     let spec = reader.spec();
 
-    let infos = reader.ixml().map(ixml::parse_tracks).unwrap_or_default();
-    // Files without iXML still get one generic track per channel.
-    let infos = if infos.is_empty() {
-        (1..=spec.channels as u32)
-            .map(|i| ixml::TrackInfo {
-                index: i,
-                name: format!("Channel {i}"),
-            })
-            .collect()
-    } else {
-        infos
-    };
+    let infos = ixml::tracks_or_channels(reader.ixml(), spec.channels);
 
     let session = match Session::load_or_migrate(Path::new(&session_path), Path::new(&path)) {
         Some(saved) => saved.merged_with(&infos),
@@ -508,21 +500,8 @@ pub fn load_recording_from_chunks(
     session_json: Option<String>,
 ) -> anyhow::Result<RecordingInfo> {
     let spec = wav::spec_from_fmt_chunk(&fmt_chunk).context("parse fmt chunk")?;
-    let infos = ixml_chunk
-        .as_deref()
-        .map(|x| ixml::parse_tracks(&String::from_utf8_lossy(x)))
-        .unwrap_or_default();
-    // Files without iXML still get one generic track per channel.
-    let infos = if infos.is_empty() {
-        (1..=spec.channels as u32)
-            .map(|i| ixml::TrackInfo {
-                index: i,
-                name: format!("Channel {i}"),
-            })
-            .collect()
-    } else {
-        infos
-    };
+    let ixml_text = ixml_chunk.as_deref().map(String::from_utf8_lossy);
+    let infos = ixml::tracks_or_channels(ixml_text.as_deref(), spec.channels);
 
     let session = match session_json.as_deref().and_then(Session::from_json) {
         Some(saved) => saved.merged_with(&infos),

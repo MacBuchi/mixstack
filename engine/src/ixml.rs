@@ -94,6 +94,22 @@ pub fn parse_tracks(ixml: &str) -> Vec<TrackInfo> {
     tracks
 }
 
+/// The track list of a take: its iXML entries, or one generic `Channel n`
+/// per channel when the file carries no (usable) iXML. App, browser and CLI
+/// all start from this list, so a template maps the same way everywhere.
+pub fn tracks_or_channels(ixml: Option<&str>, channels: u16) -> Vec<TrackInfo> {
+    let tracks = ixml.map(parse_tracks).unwrap_or_default();
+    if !tracks.is_empty() {
+        return tracks;
+    }
+    (1..=channels as u32)
+        .map(|i| TrackInfo {
+            index: i,
+            name: format!("Channel {i}"),
+        })
+        .collect()
+}
+
 /// Initial pan position for a track name: names ending in " L" / " R" are
 /// panned hard left/right (stereo pairs), everything else centred.
 /// Pan range is -1.0 (left) .. +1.0 (right).
