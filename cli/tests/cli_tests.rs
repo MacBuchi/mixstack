@@ -473,3 +473,141 @@ fn partial_mapping_is_reported_not_refused() {
     assert_eq!(v["mapping"]["unknown"].as_array().unwrap().len(), 5);
     assert_eq!(v["mapping"]["missing"][0], "Theremin");
 }
+
+#[test]
+fn measure_prints_one_measure_document() {
+    let f = Fixture::new();
+    let mix = f.write_json(
+        "m.json",
+        &Template::from_session(&f.bent_session()).to_json().unwrap(),
+    );
+    let o = run(&[
+        "measure",
+        s(&f.wav),
+        "--mix",
+        s(&mix),
+        "--start",
+        "1",
+        "--end",
+        "3",
+        "--json",
+        "--quiet",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = stdout_json(&o);
+    assert_eq!(v["schema"], "mixstack.measure/1");
+    assert_eq!(v["range"]["start"], 1.0);
+    assert_eq!(v["range"]["end"], 3.0);
+    assert_eq!(v["bands_hz"].as_array().unwrap().len(), 30);
+    assert_eq!(v["level_point"], "post_fader");
+    // The bent session leaves the two monitor buses out: 6 audible tracks.
+    assert_eq!(v["tracks"].as_array().unwrap().len(), 6);
+    let vocals = &v["tracks"][0];
+    assert_eq!(vocals["name"], "Vocals");
+    assert!(vocals["lufs_i"].is_number());
+    assert_eq!(vocals["ltas_db"].as_array().unwrap().len(), 30);
+    assert_eq!(vocals["masking"]["msr_db"].as_array().unwrap().len(), 30);
+    assert!(v["mix"]["correlation"].is_number());
+    assert!(v["mix"]["normalisation_gain_db"].is_number());
+    assert_eq!(v["mapping"]["matched"].as_array().unwrap().len(), 8);
+}
+
+#[test]
+fn measure_without_a_mix_measures_every_track_at_unity() {
+    let f = Fixture::new();
+    let o = run(&[
+        "measure",
+        s(&f.wav),
+        "--json",
+        "--quiet",
+        "--masking",
+        "off",
+    ]);
+    assert!(o.status.success());
+    let v = stdout_json(&o);
+    assert_eq!(v["tracks"].as_array().unwrap().len(), 8);
+    assert!(v["tracks"][0].get("masking").is_none());
+}
+
+#[test]
+fn compare_reports_the_change_of_a_fader() {
+    let f = Fixture::new();
+    let a = f.bent_session();
+    let mut b = a.clone();
+    b.tracks[5].gain_db -= 6.0; // Bass
+    let ma = f.write_json("a.json", &Template::from_session(&a).to_json().unwrap());
+    let mb = f.write_json("b.json", &Template::from_session(&b).to_json().unwrap());
+    let o = run(&[
+        "compare",
+        s(&f.wav),
+        "--mix-a",
+        s(&ma),
+        "--mix-b",
+        s(&mb),
+        "--json",
+        "--quiet",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = stdout_json(&o);
+    assert_eq!(v["schema"], "mixstack.compare/1");
+    let bass = v["delta"]["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "Bass")
+        .unwrap();
+    assert!(
+        (bass["lufs_i"].as_f64().unwrap() + 6.0).abs() < 0.01,
+        "{bass}"
+    );
+    let vocals = &v["delta"]["tracks"][0];
+    assert_eq!(vocals["lufs_i"], 0.0);
+    assert!(v["delta"]["mix"]["lufs_i"].as_f64().unwrap() < 0.0);
+    assert!(v["a"]["schema"] == "mixstack.measure/1" && v["b"]["schema"] == "mixstack.measure/1");
+}
+
+#[test]
+fn measure_usage_errors_exit_2() {
+    let f = Fixture::new();
+    let o = run(&[
+        "measure",
+        s(&f.wav),
+        "--tracks",
+        "Vocals,Nope",
+        "--json",
+        "--quiet",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(stdout_json(&o)["kind"], "usage");
+    let thirteen = (0..13)
+        .map(|i| format!("T{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let o = run(&[
+        "measure",
+        s(&f.wav),
+        "--masking",
+        &format!("pairs:{thirteen}"),
+        "--quiet",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(
+        run(&["measure", s(&f.wav), "--masking", "everything"])
+            .status
+            .code(),
+        Some(2)
+    );
+    // Names with commas go through repeated --track.
+    let o = run(&[
+        "measure",
+        s(&f.wav),
+        "--track",
+        "Keys L",
+        "--track",
+        "Keys R",
+        "--json",
+        "--quiet",
+    ]);
+    assert!(o.status.success());
+    assert_eq!(stdout_json(&o)["tracks"].as_array().unwrap().len(), 2);
+}

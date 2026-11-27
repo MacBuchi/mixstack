@@ -12,6 +12,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use durecmix_engine::headless::{self, HeadlessError, RenderOptions, PROBE_SCHEMA, RENDER_SCHEMA};
+use durecmix_engine::measure::{
+    LevelPoint, MaskingMode, MeasureOptions, TrackSelection, COMPARE_SCHEMA, MEASURE_SCHEMA,
+};
 use durecmix_engine::render::{LoudnessMode, OutputFormat};
 use durecmix_engine::template::{UnknownTracks, TEMPLATE_SCHEMA};
 
@@ -44,6 +47,119 @@ enum Cmd {
     },
     /// Render a recording with a template or session to a stereo file.
     Render(RenderArgs),
+    /// Measure a mix and its tracks: loudness, spectrum, masking, stereo.
+    Measure(MeasureArgs),
+    /// Measure two mixes of one recording and report the differences (b − a).
+    Compare(CompareArgs),
+}
+
+/// What to measure and how — shared by `measure` and `compare`.
+#[derive(clap::Args)]
+struct MeasureFlags {
+    /// Trim-in, seconds from the start of the recording.
+    #[arg(long)]
+    start: Option<f64>,
+    /// Trim-out, seconds from the start of the recording.
+    #[arg(long)]
+    end: Option<f64>,
+    /// `mix` (audible tracks), `all`, or a comma-separated list of names.
+    #[arg(long, default_value = "mix")]
+    tracks: String,
+    /// A track to measure, by exact name; repeatable. For names that contain
+    /// a comma, which `--tracks` cannot express. Overrides `--tracks`.
+    #[arg(long = "track")]
+    track: Vec<String>,
+    /// `off`, `vs-rest` (each track against the rest of the mix) or
+    /// `pairs:<name,name,…>` (additionally a matrix, at most 12 tracks).
+    #[arg(long, default_value = "vs-rest", value_parser = parse_masking)]
+    masking: MaskingMode,
+    /// Track levels before gain and pan (EQ applied) instead of their
+    /// contribution to the mix.
+    #[arg(long)]
+    pre_fader: bool,
+    #[arg(long, value_enum, default_value_t = UnknownArg::Exclude)]
+    unknown_tracks: UnknownArg,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    json: bool,
+    /// No progress lines on stderr.
+    #[arg(long)]
+    quiet: bool,
+}
+
+impl MeasureFlags {
+    fn options(&self) -> (RenderOptions, MeasureOptions) {
+        let tracks = if !self.track.is_empty() {
+            TrackSelection::Names(self.track.clone())
+        } else {
+            match self.tracks.as_str() {
+                "mix" => TrackSelection::Mix,
+                "all" => TrackSelection::All,
+                list => TrackSelection::Names(split_names(list)),
+            }
+        };
+        (
+            RenderOptions {
+                start_seconds: self.start,
+                end_seconds: self.end,
+                unknown: self.unknown_tracks.into(),
+                ..RenderOptions::default()
+            },
+            MeasureOptions {
+                tracks,
+                masking: self.masking.clone(),
+                point: if self.pre_fader {
+                    LevelPoint::PreFader
+                } else {
+                    LevelPoint::PostFader
+                },
+            },
+        )
+    }
+}
+
+#[derive(clap::Args)]
+struct MeasureArgs {
+    input: PathBuf,
+    /// Template or session; without it, every track at unity (a fresh mix).
+    #[arg(long)]
+    mix: Option<PathBuf>,
+    #[command(flatten)]
+    flags: MeasureFlags,
+}
+
+#[derive(clap::Args)]
+struct CompareArgs {
+    input: PathBuf,
+    #[arg(long)]
+    mix_a: PathBuf,
+    #[arg(long)]
+    mix_b: PathBuf,
+    #[command(flatten)]
+    flags: MeasureFlags,
+}
+
+fn split_names(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn parse_masking(s: &str) -> Result<MaskingMode, String> {
+    match s {
+        "off" => Ok(MaskingMode::Off),
+        "vs-rest" => Ok(MaskingMode::VsRest),
+        _ => match s.strip_prefix("pairs:") {
+            Some(list) if !split_names(list).is_empty() => {
+                Ok(MaskingMode::Pairs(split_names(list)))
+            }
+            _ => Err(format!(
+                "expected off, vs-rest or pairs:<name,name,…>, got {s:?}"
+            )),
+        },
+    }
 }
 
 #[derive(clap::Args)]
@@ -301,8 +417,106 @@ fn render(a: &RenderArgs) -> Result<(), HeadlessError> {
     Ok(())
 }
 
+fn fmt_db(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v:.1}")
+    } else {
+        "−∞".into()
+    }
+}
+
+fn measure_cmd(a: &MeasureArgs) -> Result<(), HeadlessError> {
+    let take = headless::open_take(&a.input)?;
+    let template = match &a.mix {
+        Some(p) => headless::load_mix(p)?,
+        None => headless::fresh_template(&take),
+    };
+    let (opts, mopts) = a.flags.options();
+    let out = headless::measure_template(
+        &take,
+        &template,
+        &opts,
+        &mopts,
+        VERSION,
+        progress_printer(a.flags.quiet),
+    )?;
+    if a.flags.json {
+        print_json(&out);
+        return Ok(());
+    }
+    let m = &out.measurement;
+    let l = &m.mix.level;
+    println!(
+        "{} [{:.2}–{:.2} s]: mix {} LUFS-I, LRA {:.1}, {} dBTP, PLR {}, corr {:.2}, width {:.2}",
+        out.input,
+        m.range.start,
+        m.range.end,
+        fmt_db(l.lufs_i),
+        l.lra,
+        fmt_db(l.true_peak_dbtp),
+        fmt_db(l.plr_db),
+        m.mix.correlation,
+        m.mix.width
+    );
+    for t in &m.tracks {
+        let masked = t
+            .masking
+            .as_ref()
+            .map(|k| format!(", masked {:.0} %", k.masked_fraction * 100.0))
+            .unwrap_or_default();
+        println!(
+            "  {:>3} {:<24} {:>6} LUFS, active {:>3.0} %{}",
+            t.index,
+            t.name,
+            fmt_db(t.level.lufs_i),
+            t.level.active_fraction * 100.0,
+            masked
+        );
+    }
+    Ok(())
+}
+
+fn compare_cmd(a: &CompareArgs) -> Result<(), HeadlessError> {
+    let take = headless::open_take(&a.input)?;
+    let ta = headless::load_mix(&a.mix_a)?;
+    let tb = headless::load_mix(&a.mix_b)?;
+    let (opts, mopts) = a.flags.options();
+    let out = headless::compare_templates(
+        &take,
+        &ta,
+        &tb,
+        &opts,
+        &mopts,
+        VERSION,
+        progress_printer(a.flags.quiet),
+    )?;
+    if a.flags.json {
+        print_json(&out);
+        return Ok(());
+    }
+    let d = &out.comparison.delta;
+    println!(
+        "b − a: mix {:+.2} LU, LRA {:+.2}, TP {:+.2} dB, width {:+.3}",
+        d.mix.level.lufs_i, d.mix.level.lra, d.mix.level.true_peak_dbtp, d.mix.width
+    );
+    for t in &d.tracks {
+        let masked = t
+            .masking
+            .as_ref()
+            .map(|k| format!(", masked {:+.0} pp", k.masked_fraction * 100.0))
+            .unwrap_or_default();
+        println!(
+            "  {:>3} {:<24} {:+.2} LU{}",
+            t.index, t.name, t.level.lufs_i, masked
+        );
+    }
+    Ok(())
+}
+
 fn version_line() -> String {
-    format!("mixstack {VERSION} {TEMPLATE_SCHEMA} {PROBE_SCHEMA} {RENDER_SCHEMA}")
+    format!(
+        "mixstack {VERSION} {TEMPLATE_SCHEMA} {PROBE_SCHEMA} {RENDER_SCHEMA} {MEASURE_SCHEMA} {COMPARE_SCHEMA}"
+    )
 }
 
 fn main() -> ExitCode {
@@ -314,9 +528,11 @@ fn main() -> ExitCode {
     let (result, json) = match &cli.cmd {
         Some(Cmd::Probe { input, json }) => (probe(input, *json), *json),
         Some(Cmd::Render(a)) => (render(a), a.json),
+        Some(Cmd::Measure(a)) => (measure_cmd(a), a.flags.json),
+        Some(Cmd::Compare(a)) => (compare_cmd(a), a.flags.json),
         None => {
             eprintln!(
-                "{}\n\nUsage: mixstack <probe|render> … (see --help)",
+                "{}\n\nUsage: mixstack <probe|render|measure|compare> … (see --help)",
                 version_line()
             );
             return ExitCode::from(2);

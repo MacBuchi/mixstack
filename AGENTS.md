@@ -38,6 +38,9 @@ cargo run -p durecmix-engine --release --example play_demo <in.wav> [start_s]
 cargo install --path cli                          # the headless `mixstack` CLI (see "Headless engine")
 mixstack probe <in.wav> --json
 mixstack render <in.wav> --mix <template|session.json> --out <out.wav|flac|mp3> [--start s] [--end s] [--json]
+mixstack measure <in.wav> [--mix …] [--start s] [--end s] [--tracks mix|all|<names>] [--masking off|vs-rest|pairs:<names>] [--json]
+mixstack compare <in.wav> --mix-a a.json --mix-b b.json [--start s] [--end s] [--json]
+cargo run -p durecmix-engine --release --example channel_scaling 200 0.0   # playback AND measurement cost per channel count
 ```
 
 Rust toolchain: rustup at `~/.cargo` (needs `source ~/.cargo/env` in fresh shells). Flutter SDK: `/Volumes/MacStore/Programming/Flutter/SDK/flutter`. `gh` CLI is installed and authenticated — use it for CI status (`gh run list`, `gh run view`), issues and PRs.
@@ -111,6 +114,13 @@ Phase 6/7 of the band player (MacBuchi/bandplayer#8, #22) drives the engine with
   - Format from the extension (`.wav` = 24-bit, `.flac` = 24-bit, `.mp3`) unless `--format`. **MP3 is always CBR** (`RenderSettings::mp3_bitrate_kbps`, default 320, set `MP3_CBR_KBPS`; LAME's VBR mode is switched off explicitly) — browsers derive an MP3's duration and seek positions from the first frame's bitrate, and the band player streams 128 kbps to browsers. A session without the field loads as 320.
   - `mixstack --version` prints `mixstack <release> mixstack.mix/1 mixstack.probe/1 mixstack.render/1`; the release comes from `pubspec.yaml` via `cli/build.rs`, so CLI and app from one commit name the same version. The `release.yml` job `cli` checks that and ships `mixstack-cli-<tag>-macos-arm64.zip` (unsigned, with LICENSE and the crate notices).
   - Measured 2026-11-27 on the user's Mac (release build): UFX33 (34 ch, 24-bit/44.1 kHz), 117 s range, template on 4 tracks, MP3 128 kbps → 5.4 s wall, −16.00 LUFS-I hit exactly.
+- **`mixstack measure|compare` — the measurement module (#166, `engine/src/measure.rs`, contract in `docs/MEASURE.md`).** One streaming read (`MeasureStream`, pushable like `MixScan`) serves any number of mixes, which is how `compare` reads the file once for both. Loudness per BS.1770-5 via `ebur128`, LTAS in IEC 61260 third-octaves (AES17 dBFS: full-scale sine = 0 dB), masking per track **against the rest of the mix** after the cross-adaptive MPEG metric of Ma, Reiss et al. (arXiv:1803.09960 v1/v2 — the arXiv entry is withdrawn, v1/v2 are still served) with a simplified model-2 threshold (third-octaves, Schroeder spreading on Bark, 6/29 dB offsets by spectral flatness). Things that look odd but are load-bearing:
+  - **Rest = mix − track in the spectral domain** (`R = X_mix − g·S`): one FFT per track and frame, never one per pair. The pairwise matrix exists only for ≤ 12 named tracks (`MAX_PAIR_TRACKS`).
+  - **A band only counts where it is audible in the track solo** (above the track's own threshold). Without that, window leakage of a loud partial (50–70 dB down in neighbouring bands) counts as content and is "masked" — a pure tone read as 60 % masked on the fixture while its real band was not.
+  - **Momentary/short-term loudness come from 100 ms block energies averaged over 4/30 blocks**, not from `loudness_momentary()`/`loudness_shortterm()`: those re-sum their whole window every 100 ms (34× the audio) and were 60 % of the measurement time (found with `sample`, not guessed).
+  - **The mix is the render-pass-1 bus** (pre-normalisation, no fades); `the_mix_is_the_bus_render_pass_1_measures` pins LUFS and peak against `analyze_mix_level`, and the predicted gain comes from `normalisation_gain` (rule 6).
+  - Measured 2026-11-27 (release, user's Mac), `channel_scaling <n> 0.0`: measurement 34 tracks 9.3× realtime, 100 → 3.1×, 200 → 1.5× (linear: per-track cost flat). Real UFX33: 30 s excerpt 3.5 s, whole song 21.9 s. A unity mix of a DUREC take reads as heavily masked because the monitor buses duplicate every source — that is the measurement being right, not wrong.
+  - Since Rust 1.100 Clippy rejects `chunks_exact(<const>)` (`chunks_exact_to_as_chunks`); use `as_chunks::<N>().0`. CI's toolchain is `stable`, so a local toolchain older than CI's will pass what CI fails — `rustup update stable` first.
   - The crate-notice asset (`tool/gen_rust_licenses.py`) is workspace-wide, so it now lists the CLI's crates (clap) too — over-inclusive for the app, exactly right for the CLI zip that carries the same file.
 
 ## Errors, logging and what a bug report carries
@@ -269,7 +279,7 @@ xcrun devicectl device process launch --device <udid> --console de.macbuchi.dure
 
 ## Testing
 
-Rust carries the correctness load (133 engine tests + 8 CLI tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
+Rust carries the correctness load (145 engine tests + 12 CLI tests: pan law, limiter ceiling, LUFS targets, session migration). On the Dart side:
 
 - `flutter analyze` + `flutter test` after every change; the macOS integration test (`flutter test integration_test -d macos`) is the flow guard and runs in CI.
 - **Keep the integration test in ONE file** — several app launches per run are flaky on macOS. Build synthetic fixtures inline (the doc fixture WAV with iXML), never the user's multi-GB recordings. Network stays off.

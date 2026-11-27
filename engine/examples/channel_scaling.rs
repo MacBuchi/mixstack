@@ -12,10 +12,20 @@
 //! Two numbers, because they fail differently: mixing+metering has to stay
 //! **above realtime** or live playback cannot keep up at all, while a parameter
 //! change has to stay cheap enough to happen on every pointer move of a fader.
+//!
+//! A third number covers the measurement module (#166): every audible track
+//! measured with masking against the rest of the mix, which is what the
+//! band player's closed loop runs. It is offline work, so it only has to be
+//! linear — the ×-realtime figure per track should stay flat as the channel
+//! count grows.
 
 use durecmix_engine::chain::MasterParams;
+use durecmix_engine::measure::{MeasureJob, MeasureOptions, MeasureStream, TrackSelection};
 use durecmix_engine::mix::TrackParams;
 use durecmix_engine::preview::PreviewStage;
+
+/// What the measurement reads per block — the render's block size.
+const BLOCK: usize = durecmix_engine::render::BLOCK_FRAMES;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -80,6 +90,43 @@ fn main() {
         println!(
             "  ⚠️  below 2× realtime — live playback has no headroom left here; \
              export still works, it is simply not realtime-bound"
+        );
+    }
+
+    // Measurement: the audible tracks against the rest of the mix, plus a
+    // second pass with every track measured (muted ones read as silence and
+    // skip their spectra, so this mainly shows the per-track floor).
+    let settings = durecmix_engine::render::RenderSettings::default();
+    let measure_seconds = 5.0;
+    let mrounds = (sr as f64 * measure_seconds) as usize / BLOCK;
+    let big: Vec<f64> = (0..BLOCK * channels)
+        .map(|i| ((i.wrapping_mul(2_654_435_761) % 1_000_003) as f64 / 1_000_003.0 - 0.5) * 0.5)
+        .collect();
+    for (label, selection) in [
+        ("audible", TrackSelection::Mix),
+        ("all", TrackSelection::All),
+    ] {
+        let jobs = [MeasureJob {
+            tracks: &tracks,
+            tags: &[],
+            settings: &settings,
+        }];
+        let opts = MeasureOptions {
+            tracks: selection,
+            ..MeasureOptions::default()
+        };
+        let mut stream = MeasureStream::new(&jobs, channels, sr, 0, &opts).unwrap();
+        let t2 = std::time::Instant::now();
+        for _ in 0..mrounds {
+            stream.push_frames(&big);
+        }
+        let m = stream.finish();
+        let took = t2.elapsed().as_secs_f64();
+        let audio = (mrounds * BLOCK) as f64 / sr as f64;
+        println!(
+            "  measure ({label}, {} tracks, masking vs rest): {took:.3} s for {audio:.1} s  →  {:.1}× realtime",
+            m[0].tracks.len(),
+            audio / took
         );
     }
 }
