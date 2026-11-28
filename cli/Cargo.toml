@@ -1,0 +1,55 @@
+[package]
+name = "mixstack-cli"
+# The version users see comes from pubspec.yaml (see build.rs), so the app
+# and the CLI built from the same commit always report the same release.
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Headless Mixstack: probe and render multichannel recordings with the app's engine"
+
+[[bin]]
+name = "mixstack"
+path = "src/main.rs"
+
+[dependencies]
+# The engine without `playback`, so the CLI carries no cpal and needs no
+# audio device; LAME for MP3 like the native app.
+# `schema` derives the JSON Schemas of the outputs (`mixstack schema`, and the
+# MCP server's outputSchema) from the engine's own types.
+durecmix-engine = { path = "../engine", default-features = false, features = ["mp3", "schema"] }
+clap = { version = "4", features = ["derive", "string"] }
+# Shell completions and man pages, generated from the same clap definition
+# as --help so neither can drift from it (`mixstack completions`, the
+# release zip's man/).
+clap_complete = "4"
+clap_mangen = "0.2"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# MCP server (`mixstack mcp`, #167). Pinned exactly: the SDK tracks a young
+# specification (2026-07-28: stateless, no initialize) and minor releases
+# have changed wire behaviour. Without default features because the default
+# set pulls chrono (RUSTSEC-2026-0543), which nothing here needs.
+rmcp = { version = "=3.12.0", default-features = false, features = [
+  "base64",
+  "macros",
+  "server",
+  "transport-io",
+], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync"], optional = true }
+
+[features]
+# On by default so `cargo install --path cli` and the release zip carry the
+# server; `--no-default-features` builds the plain CLI. rmcp/tokio never
+# reach the engine or the app either way — they live in this crate only.
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:tokio"]
+
+[dev-dependencies]
+tempfile = "3"
+rmcp = { version = "=3.12.0", default-features = false, features = [
+  "base64",
+  "client",
+  "transport-child-process",
+] }
+tokio = { version = "1", features = ["full"] }

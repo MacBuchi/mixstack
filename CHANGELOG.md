@@ -6,6 +6,45 @@ builds a release, but it stays a prerelease — invisible to the update check �
 until someone runs the Promote workflow by hand. The app bundles this file
 and shows it under **About → What's new**.
 
+## [0.21.1] – 2026-11-28
+
+### Added
+
+- **The `mixstack` command-line tool now comes with its manual.** The download
+  includes man pages (`man mixstack-render`), tab completion for zsh, bash and
+  fish, and a full reference of every command and option. `mixstack --help`
+  now explains every option and shows examples, and `mixstack schema` prints
+  the exact format of each JSON answer, for programs that read them. The app
+  itself is unchanged.
+
+## [0.21.0] – 2026-11-28
+
+### Added
+
+- **Mixstack now also runs without its window: the `mixstack` command-line
+  tool.** It plays no part in the app itself, but it uses the same audio
+  engine: `mixstack render` produces exactly the file the app's export would,
+  byte for byte, so a script or another program can turn a recording into a
+  mixdown. `mixstack probe` reads a recording's tracks, and `mixstack measure`
+  and `mixstack compare` measure a mix: loudness, the frequency balance in
+  third-octave bands, stereo width, and how much each track is masked by the
+  rest of the mix. Released as a separate download for macOS (Apple Silicon).
+- **Mix templates.** A template is a mix with nothing take-specific in it, so
+  one setup can be applied to many recordings. Tracks are matched by name, and
+  where that fails, by position. A report lists which tracks matched, which
+  tracks were new and which were missing — nothing is guessed from names.
+- **An MCP server for AI assistants** (`mixstack mcp`): an assistant such as
+  Claude can load a mix, measure it, adjust faders and EQ, compare the two
+  versions and render the result. It only reads the folders you name and only
+  writes into the one output folder you choose.
+
+### Changed
+
+- **MP3 exports are pinned to a constant bitrate.** Browsers and web players
+  read an MP3's length and seek positions from its bitrate, which is only
+  reliable for constant-bitrate files, so the encoder's variable-bitrate mode
+  is now switched off explicitly. 320 kbps stays the default.
+
 ## [0.20.6] – 2026-08-19
 
 ### Fixed
@@ -590,6 +629,8 @@ MP3 export.
 - **Listen while you mix**, with meters for level, loudness and how well the
   two sides of the stereo image agree — plus a waveform on every track.
 
+[0.21.1]: https://github.com/MacBuchi/mixstack/releases/tag/v0.21.1
+[0.21.0]: https://github.com/MacBuchi/mixstack/releases/tag/v0.21.0
 [0.20.6]: https://github.com/MacBuchi/mixstack/releases/tag/v0.20.6
 [0.20.5]: https://github.com/MacBuchi/mixstack/releases/tag/v0.20.5
 [0.20.4]: https://github.com/MacBuchi/mixstack/releases/tag/v0.20.4

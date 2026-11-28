@@ -6,6 +6,7 @@ use crate::dsp::{db_to_linear, pan_gains, GAIN_FLOOR_DB};
 
 /// HPF slope: one or two cascaded 2nd-order Butterworth sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum HpfSlope {
     #[default]
     Db12,
@@ -14,6 +15,7 @@ pub enum HpfSlope {
 
 /// One parametric EQ band (peak or shelf depending on its slot).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EqBand {
     pub enabled: bool,
     pub freq: f64,
@@ -35,6 +37,7 @@ impl EqBand {
 /// Per-track high-pass filter + 3-band EQ (low shelf, mid peak, high shelf).
 /// Everything defaults to bypassed, so pre-M3 sessions load unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct TrackEq {
     pub hpf_enabled: bool,
@@ -68,6 +71,7 @@ impl TrackEq {
 /// Per-track mix parameters. `index` is the 1-based interleave index of the
 /// channel inside the source WAV.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrackParams {
     pub index: u32,
     pub name: String,

@@ -23,6 +23,7 @@ use crate::wav::{InputHandle, WavReader};
 pub const BLOCK_FRAMES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum LoudnessMode {
     /// No normalisation. If the limiter is also disabled, gain is still
     /// reduced when the mix would clip; with the limiter on, overs are its job.
@@ -35,13 +36,15 @@ pub enum LoudnessMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum OutputFormat {
     Wav16,
     Wav24,
     Wav32Float,
     Flac16,
     Flac24,
-    /// MP3, CBR 320 kbps (LAME) — parity with the Python tool's exports.
+    /// MP3, constant bitrate — [`RenderSettings::mp3_bitrate_kbps`],
+    /// 320 kbps unless set otherwise (parity with the Python tool).
     Mp3,
 }
 
@@ -69,9 +72,22 @@ fn default_ceiling_dbtp() -> f64 {
 fn default_dither() -> bool {
     true
 }
+fn default_mp3_bitrate() -> u32 {
+    320
+}
+
+/// Constant MP3 bitrates the engine encodes, in kbps.
+///
+/// Always CBR, never VBR: a browser estimates an MP3's duration and seek
+/// positions from the bitrate of the first frame, so a VBR stream reports a
+/// wrong length and lands seeks in the wrong place — and the band player
+/// streams exactly these files to browsers. The set is the MPEG-1 Layer III
+/// bitrates from 96 kbps up, which both encoders (LAME, Shine) accept.
+pub const MP3_CBR_KBPS: [u32; 8] = [96, 112, 128, 160, 192, 224, 256, 320];
 
 /// One chosen reference track (path + display name for the UI).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MasteringReference {
     pub path: String,
     pub name: String,
@@ -84,6 +100,7 @@ pub struct MasteringReference {
 /// pair; v4 stores the `references` list (multi-reference genre curves) and
 /// keeps the legacy fields mirrored to the first entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MasteringSettings {
     pub enabled: bool,
     #[serde(default)]
@@ -111,6 +128,7 @@ impl MasteringSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RenderSettings {
     pub loudness: LoudnessMode,
     pub format: OutputFormat,
@@ -139,6 +157,10 @@ pub struct RenderSettings {
     /// Reference mastering (v3 sessions; absent in older files).
     #[serde(default)]
     pub mastering: Option<MasteringSettings>,
+    /// MP3 bitrate in kbps (CBR, one of [`MP3_CBR_KBPS`]); ignored for
+    /// every other format. Absent in older sessions, which meant 320.
+    #[serde(default = "default_mp3_bitrate")]
+    pub mp3_bitrate_kbps: u32,
 }
 
 impl Default for RenderSettings {
@@ -154,6 +176,7 @@ impl Default for RenderSettings {
             fade_in_ms: 0.0,
             fade_out_ms: 0.0,
             mastering: None,
+            mp3_bitrate_kbps: default_mp3_bitrate(),
         }
     }
 }
@@ -186,7 +209,7 @@ impl FadeEnvelope {
         if !self.is_active() {
             return;
         }
-        for (i, fr) in stereo.chunks_exact_mut(2).enumerate() {
+        for (i, fr) in stereo.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let pos = block_start + i as u64;
             let mut g = 1.0;
             if pos < self.fade_in_frames {
@@ -203,20 +226,26 @@ impl FadeEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RenderReport {
     /// Sample peak of the raw (pre-normalisation) mix, in dBFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub peak_dbfs_before: f64,
     /// Gain applied by the normalisation stage, in dB.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub gain_applied_db: f64,
     pub duration_seconds: f64,
     pub sample_rate: u32,
     /// Integrated loudness of the delivered file (post-limiter), LUFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub integrated_lufs: f64,
     /// True peak of the delivered file (post-limiter), dBTP.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub true_peak_dbtp: f64,
     /// Loudness range of the delivered file, LU.
     pub lra_lu: f64,
     /// Integrated loudness of the source mix (pre-gain), LUFS.
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub source_integrated_lufs: f64,
     /// Whether reference mastering was applied to this render.
     #[serde(default)]
@@ -688,7 +717,7 @@ pub fn render_io(
 ) -> Result<RenderReport> {
     let mut reader = input.open()?;
     let spec = reader.spec();
-    crate::sink::validate_format(settings.format, spec.sample_rate)?;
+    crate::sink::validate_format(settings.format, spec.sample_rate, settings.mp3_bitrate_kbps)?;
     let channels = spec.channels as usize;
     let num_frames = reader.num_frames();
     let start = settings.trim_start_frame.min(num_frames);
@@ -730,7 +759,12 @@ pub fn render_io(
 
     // Pass 2: mix → gain → mastering → limiter → measure → encode. A fresh
     // chain — filter state must not leak from pass 1.
-    let sink = StereoSink::create(output, settings.format, spec.sample_rate)?;
+    let sink = StereoSink::create(
+        output,
+        settings.format,
+        spec.sample_rate,
+        settings.mp3_bitrate_kbps,
+    )?;
     let mut p2 = RenderPass2::new(&src, settings, &pass1, plan, sink)?;
     reader.seek_to_frame(start)?;
     loop {
@@ -875,7 +909,7 @@ impl StreamRender {
         // Before pass 1, not after: the sink is only built in `start_pass2`,
         // and the browser would otherwise scan the whole source before
         // admitting it cannot write the target.
-        crate::sink::validate_format(settings.format, sample_rate)?;
+        crate::sink::validate_format(settings.format, sample_rate, settings.mp3_bitrate_kbps)?;
         let pass1 = RenderPass1::new(
             &RenderSource {
                 channels,
@@ -921,7 +955,12 @@ impl StreamRender {
         };
         let measured = pass.finish();
         let plan = plan_from_pass1(&self.settings, &measured, self.reference.as_ref())?;
-        let sink = StereoSink::new(self.sink.clone(), self.settings.format, self.sample_rate)?;
+        let sink = StereoSink::new(
+            self.sink.clone(),
+            self.settings.format,
+            self.sample_rate,
+            self.settings.mp3_bitrate_kbps,
+        )?;
         let pass2 = RenderPass2::new(
             &RenderSource {
                 channels: self.channels,

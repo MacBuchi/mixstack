@@ -9,6 +9,7 @@ use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrackInfo {
     /// 1-based interleave index (channel position in the WAV file).
     pub index: u32,
@@ -92,6 +93,22 @@ pub fn parse_tracks(ixml: &str) -> Vec<TrackInfo> {
 
     tracks.sort_by_key(|t| t.index);
     tracks
+}
+
+/// The track list of a take: its iXML entries, or one generic `Channel n`
+/// per channel when the file carries no (usable) iXML. App, browser and CLI
+/// all start from this list, so a template maps the same way everywhere.
+pub fn tracks_or_channels(ixml: Option<&str>, channels: u16) -> Vec<TrackInfo> {
+    let tracks = ixml.map(parse_tracks).unwrap_or_default();
+    if !tracks.is_empty() {
+        return tracks;
+    }
+    (1..=channels as u32)
+        .map(|i| TrackInfo {
+            index: i,
+            name: format!("Channel {i}"),
+        })
+        .collect()
 }
 
 /// Initial pan position for a track name: names ending in " L" / " R" are
