@@ -6,6 +6,17 @@ builds a release, but it stays a prerelease — invisible to the update check �
 until someone runs the Promote workflow by hand. The app bundles this file
 and shows it under **About → What's new**.
 
+## [0.21.1] – 2026-11-28
+
+### Added
+
+- **The `mixstack` command-line tool now comes with its manual.** The download
+  includes man pages (`man mixstack-render`), tab completion for zsh, bash and
+  fish, and a full reference of every command and option. `mixstack --help`
+  now explains every option and shows examples, and `mixstack schema` prints
+  the exact format of each JSON answer, for programs that read them. The app
+  itself is unchanged.
+
 ## [0.21.0] – 2026-11-28
 
 ### Added
@@ -618,6 +629,7 @@ MP3 export.
 - **Listen while you mix**, with meters for level, loudness and how well the
   two sides of the stereo image agree — plus a waveform on every track.
 
+[0.21.1]: https://github.com/MacBuchi/mixstack/releases/tag/v0.21.1
 [0.21.0]: https://github.com/MacBuchi/mixstack/releases/tag/v0.21.0
 [0.20.6]: https://github.com/MacBuchi/mixstack/releases/tag/v0.20.6
 [0.20.5]: https://github.com/MacBuchi/mixstack/releases/tag/v0.20.5
