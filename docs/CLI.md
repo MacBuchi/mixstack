@@ -29,10 +29,9 @@ document also comes as a JSON Schema from [`mixstack schema`](#mixstack-schema).
 [releases](https://github.com/MacBuchi/mixstack/releases), unpack it and put
 `mixstack` on your `PATH`. The binary is not signed; on first start macOS
 blocks it — allow it under *System Settings → Privacy & Security*, or run
-`xattr -d com.apple.quarantine mixstack`. The zip carries the licence notices
-and — from the release after 0.21.0 on — this reference, the man pages
-(`man/`) and shell completions (`completions/`). With 0.21.0, generate them
-yourself as shown below.
+`xattr -d com.apple.quarantine mixstack`. The zip also carries this reference,
+the man pages (`man/`), shell completions (`completions/`) and the licence
+notices (from 0.21.1 on; with 0.21.0, generate them as shown below).
 
 **From source** (any platform with a Rust toolchain):
 
