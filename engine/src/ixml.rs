@@ -51,7 +51,7 @@ pub fn parse_tracks(ixml: &str) -> Vec<TrackInfo> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag = e.name().as_ref().to_string();
                 if tag == "TRACK" {
                     in_track = true;
                     name = None;
@@ -62,18 +62,17 @@ pub fn parse_tracks(ixml: &str) -> Vec<TrackInfo> {
             }
             Ok(Event::Text(t)) => {
                 if in_track {
-                    if let Ok(text) = t.decode() {
-                        match current_tag.as_deref() {
-                            Some("NAME") => name = Some(text.into_owned()),
-                            Some("INTERLEAVE_INDEX") => index = text.trim().parse().ok(),
-                            _ => {}
-                        }
+                    let text = t.xml10_content();
+                    match current_tag.as_deref() {
+                        Some("NAME") => name = Some(text.into_owned()),
+                        Some("INTERLEAVE_INDEX") => index = text.trim().parse().ok(),
+                        _ => {}
                     }
                 }
             }
             Ok(Event::End(e)) => {
                 let tag = e.name();
-                if tag.as_ref() == b"TRACK" {
+                if tag.as_ref() == "TRACK" {
                     if let Some(idx) = index {
                         tracks.push(TrackInfo {
                             index: idx,
