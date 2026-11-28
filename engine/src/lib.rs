@@ -9,9 +9,12 @@
 pub mod analysis;
 pub mod chain;
 pub mod dsp;
+pub mod edit;
 pub mod error;
+pub mod headless;
 pub mod ixml;
 pub mod mastering;
+pub mod measure;
 pub mod mix;
 #[cfg(feature = "mp3-any")]
 pub mod mp3;
@@ -22,6 +25,7 @@ pub mod reference;
 pub mod render;
 pub mod session;
 pub mod sink;
+pub mod template;
 pub mod wav;
 
 pub use error::{EngineError, Result};

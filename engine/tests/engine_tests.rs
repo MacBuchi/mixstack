@@ -415,7 +415,7 @@ fn chain_state_adoption_is_click_free() {
     // samples of a 60 Hz sine at 44.1 kHz can never jump by more than ~0.02
     // plus what the 0.5 dB coefficient step explains.
     let mut prev = out_a[out_a.len() - 2]; // left channel, last frame
-    for fr in out_b.chunks_exact(2) {
+    for fr in out_b.as_chunks::<2>().0 {
         assert!(
             (fr[0] - prev).abs() < 0.05,
             "click at parameter swap: {} -> {}",
@@ -520,7 +520,9 @@ fn limiter_output_is_sample_aligned_and_length_preserving() {
     lim.flush(&mut out);
     assert_eq!(out.len(), input.len());
     let (pos, _) = out
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .max_by(|a, b| a.1[0].abs().partial_cmp(&b.1[0].abs()).unwrap())
         .unwrap();
@@ -1499,7 +1501,9 @@ fn direct_ms_conv(stereo: &[f64], fir_mid: &[f64], fir_side: &[f64]) -> Vec<f64>
         }
     };
     let ms: Vec<(f64, f64)> = stereo
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|fr| ((fr[0] + fr[1]) * 0.5, (fr[0] - fr[1]) * 0.5))
         .collect();
     let mut out = Vec::with_capacity(stereo.len());
@@ -1538,7 +1542,7 @@ fn fir_stage_impulse_reproduces_taps() {
     assert_eq!(out.len(), input.len());
     // Identical mid/side filters act per-channel: out_l[n] = taps[n + latency].
     let latency = stage.latency_frames();
-    for (n, fr) in out.chunks_exact(2).enumerate() {
+    for (n, fr) in out.as_chunks::<2>().0.iter().enumerate() {
         let expected = taps.get(n + latency).copied().unwrap_or(0.0);
         assert!(
             (fr[0] - expected).abs() < 1e-12,
@@ -1697,7 +1701,7 @@ fn mastering_matches_reference_tone_level_and_width() {
     let mut reference = ms_noise(frames, 0.15, 0.06, 20);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -1839,6 +1843,7 @@ fn write_ref_fixture(path: &std::path::Path, format: OutputFormat, stereo: &[f64
         &OutputHandle::Path(path.to_str().unwrap().into()),
         format,
         sr,
+        320,
     )
     .unwrap();
     for chunk in stereo.chunks(2 * 65_536) {
@@ -2048,7 +2053,7 @@ fn render_with_reference_masters_the_mix() {
     let mut reference = ms_noise(20 * sr as usize, 0.15, 0.06, 81);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -2574,7 +2579,13 @@ fn render_streamed(
         settings,
         &measured,
         plan,
-        StereoSink::new(sink.clone(), settings.format, spec.sample_rate).unwrap(),
+        StereoSink::new(
+            sink.clone(),
+            settings.format,
+            spec.sample_rate,
+            settings.mp3_bitrate_kbps,
+        )
+        .unwrap(),
     )
     .unwrap();
     let mut reader = input.open().unwrap();
@@ -2968,7 +2979,14 @@ fn the_start_ramp_eases_in_after_start_and_seek_but_not_after_rewind() {
         (mid - steady * 0.5).abs() < 1e-6,
         "ramp midpoint reads {mid}, expected half of {steady}"
     );
-    for (i, fr) in out.chunks_exact(2).take(ramp / 2).enumerate().skip(1) {
+    for (i, fr) in out
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(ramp / 2)
+        .enumerate()
+        .skip(1)
+    {
         let prev = out[(i - 1) * 2];
         assert!(
             fr[0] >= prev,
@@ -3544,7 +3562,7 @@ fn byte_driven_render_matches_the_file_render_with_a_mastering_plan() {
     let mut reference = ms_noise(8 * sr as usize, 0.15, 0.07, 94);
     let coeffs = BiquadCoeffs::high_shelf(sr as f64, 4000.0, 6.0, BUTTERWORTH_2ND_Q);
     let (mut bl, mut br) = (Biquad::new(coeffs), Biquad::new(coeffs));
-    for fr in reference.chunks_exact_mut(2) {
+    for fr in reference.as_chunks_mut::<2>().0 {
         fr[0] = bl.process(fr[0]);
         fr[1] = br.process(fr[1]);
     }
@@ -3728,7 +3746,7 @@ fn a_muted_track_keeps_reading_but_a_silent_channel_does_not() {
     }
     let mixed = stage.process(&block).to_vec();
     let expected = 0.4 * std::f64::consts::FRAC_1_SQRT_2; // centre pan, -3 dB
-    for fr in mixed.chunks_exact(2) {
+    for fr in mixed.as_chunks::<2>().0 {
         assert!((fr[0] as f64 - expected).abs() < 1e-6, "muted audio leaked");
     }
 }
@@ -3906,11 +3924,1220 @@ fn a_two_hundred_channel_take_mixes_and_meters_correctly() {
         .filter(|(i, _)| i % 4 == 0)
         .map(|(_, v)| v * std::f64::consts::FRAC_1_SQRT_2)
         .sum();
-    for fr in out.chunks_exact(2) {
+    for fr in out.as_chunks::<2>().0 {
         assert!(
             (fr[0] as f64 - expected).abs() < 1e-4,
             "mixed {} instead of {expected}",
             fr[0]
         );
+    }
+}
+
+// ── mix templates (mixstack.mix/1, #164) ────────────────────────────────────
+
+mod template_tests {
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::mix::TrackParams;
+    use durecmix_engine::render::{LoudnessMode, OutputFormat, RenderSettings};
+    use durecmix_engine::session::Session;
+    use durecmix_engine::template::{
+        apply_template, normalize_name, MatchedBy, Template, UnknownTracks, TEMPLATE_SCHEMA,
+    };
+
+    fn info(index: u32, name: &str) -> TrackInfo {
+        TrackInfo {
+            index,
+            name: name.into(),
+        }
+    }
+
+    /// A session with every track bent away from its defaults, so a lost
+    /// field cannot hide behind a default value.
+    fn bent_session(names: &[&str]) -> Session {
+        let mut s = Session::from_track_info(
+            &names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| info(i as u32 + 1, n))
+                .collect::<Vec<_>>(),
+        );
+        for (i, t) in s.tracks.iter_mut().enumerate() {
+            t.gain_db = -3.0 - i as f64;
+            t.pan = 0.25 * i as f64 - 0.5;
+            t.polarity_invert = i % 2 == 0;
+            t.eq.hpf_enabled = true;
+            t.eq.hpf_freq = 60.0 + 10.0 * i as f64;
+            t.eq.mid.enabled = true;
+            t.eq.mid.gain_db = 2.5;
+        }
+        s.settings.loudness = LoudnessMode::LufsIntegrated(-16.0);
+        s.settings.ceiling_dbtp = -1.5;
+        // Per-render fields that must NOT travel with a template.
+        s.settings.trim_start_frame = 1000;
+        s.settings.trim_end_frame = Some(5000);
+        s.settings.fade_in_ms = 80.0;
+        s.settings.format = OutputFormat::Mp3;
+        s
+    }
+
+    #[test]
+    fn template_round_trips_through_json() {
+        let s = bent_session(&["Vox", "Bass", "Keys L", "Keys R"]);
+        let mut t = Template::from_session_with_tags(&s, &[vec!["vocals".into()]]);
+        t.name = "Band".into();
+        t.created = Some("2026-11-25T21:10:00Z".into());
+        let back = Template::from_json(&t.to_json().unwrap()).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.schema, TEMPLATE_SCHEMA);
+        assert_eq!(back.tracks[0].tags, vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn template_leaves_per_render_settings_out() {
+        let s = bent_session(&["Vox"]);
+        let json = Template::from_session(&s).to_json().unwrap();
+        for field in [
+            "trim_start_frame",
+            "trim_end_frame",
+            "fade_in_ms",
+            "format",
+            "dither",
+        ] {
+            assert!(
+                !json.contains(field),
+                "{field} leaked into the template: {json}"
+            );
+        }
+        let applied = apply_template(
+            &Template::from_json(&json).unwrap(),
+            &[info(1, "Vox")],
+            UnknownTracks::Exclude,
+        );
+        assert_eq!(applied.session.settings.trim_start_frame, 0);
+        assert_eq!(
+            applied.session.settings.format,
+            RenderSettings::default().format
+        );
+        assert_eq!(
+            applied.session.settings.loudness,
+            LoudnessMode::LufsIntegrated(-16.0)
+        );
+        assert_eq!(applied.session.settings.ceiling_dbtp, -1.5);
+    }
+
+    #[test]
+    fn template_applied_to_its_own_take_reproduces_the_session_tracks() {
+        let names = ["Vox", "Bass", "Keys L", "Keys R"];
+        let s = bent_session(&names);
+        let take: Vec<_> = s.tracks.iter().map(|t| info(t.index, &t.name)).collect();
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.session.tracks, s.tracks);
+        assert!(applied.report.unknown.is_empty() && applied.report.missing.is_empty());
+        assert!(applied
+            .report
+            .matched
+            .iter()
+            .all(|m| m.by == MatchedBy::Name));
+    }
+
+    #[test]
+    fn mapping_follows_names_when_the_channel_order_changes() {
+        let s = bent_session(&["Vox", "Bass", "Gtr"]);
+        // Next rehearsal: same tracks, different interleave order.
+        let take = [info(1, "Gtr"), info(2, "Vox"), info(3, "Bass")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        let by_name = |n: &str| {
+            applied
+                .session
+                .tracks
+                .iter()
+                .find(|t| t.name == n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_name("Vox").gain_db, s.tracks[0].gain_db);
+        assert_eq!(
+            by_name("Vox").index,
+            2,
+            "the take's index wins, not the template's"
+        );
+        assert_eq!(by_name("Gtr").gain_db, s.tracks[2].gain_db);
+    }
+
+    #[test]
+    fn renamed_track_falls_back_to_its_index_and_new_tracks_are_unknown() {
+        // The example from issue #164.
+        let s = bent_session(&["Bass_Out", "Kanal 2 alt", "Keys_O S L"]);
+        let t = Template::from_session(&s);
+        let take = [
+            info(1, "Bass_Out"),
+            info(2, "Kanal 12"),
+            info(4, "Neue Spur"),
+        ];
+        let applied = apply_template(&t, &take, UnknownTracks::Exclude);
+        let r = &applied.report;
+        assert_eq!(r.matched.len(), 2);
+        assert_eq!(r.matched[0].by, MatchedBy::Name);
+        assert_eq!(r.matched[1].by, MatchedBy::Index);
+        assert_eq!(r.matched[1].name, "Kanal 12");
+        assert_eq!(r.matched[1].template_name, "Kanal 2 alt");
+        assert_eq!(r.unknown, vec!["Neue Spur".to_string()]);
+        assert_eq!(r.missing, vec!["Keys_O S L".to_string()]);
+        assert_eq!(applied.session.tracks[1].gain_db, s.tracks[1].gain_db);
+    }
+
+    #[test]
+    fn a_template_track_claimed_by_name_is_not_reused_by_index() {
+        // "Vox" moved from channel 1 to channel 2; the new channel 1 must not
+        // inherit Vox's fader through the index round.
+        let s = bent_session(&["Vox"]);
+        let take = [info(1, "Click"), info(2, "Vox")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.report.unknown, vec!["Click".to_string()]);
+        assert!(!applied.session.tracks[0].in_mix);
+        assert_eq!(applied.session.tracks[1].gain_db, s.tracks[0].gain_db);
+    }
+
+    #[test]
+    fn unknown_tracks_follow_the_callers_rule() {
+        let t = Template::from_session(&bent_session(&["Vox"]));
+        let take = [info(1, "Vox"), info(2, "Keys L")];
+        let ex = apply_template(&t, &take, UnknownTracks::Exclude);
+        assert!(
+            !ex.session.tracks[1].in_mix,
+            "exclude is the template default"
+        );
+        let inc = apply_template(&t, &take, UnknownTracks::Include);
+        assert!(inc.session.tracks[1].in_mix);
+        assert_eq!(inc.session.tracks[1].gain_db, 0.0);
+        // Same defaults as a fresh session — the sanctioned L/R pan rule only.
+        assert_eq!(inc.session.tracks[1].pan, -1.0);
+        assert_eq!(UnknownTracks::default(), UnknownTracks::Exclude);
+    }
+
+    #[test]
+    fn normalised_names_match_but_are_reported_as_such() {
+        assert_eq!(normalize_name("  Bass   OUT "), "bass out");
+        assert_ne!(normalize_name("Bass_Out"), normalize_name("Bass Out"));
+        let t = Template::from_session(&bent_session(&["Bass Out"]));
+        let take = [info(7, "bass  out")];
+        let applied = apply_template(&t, &take, UnknownTracks::Exclude);
+        assert_eq!(applied.report.matched[0].by, MatchedBy::Normalized);
+        assert!(applied.session.tracks[0].in_mix);
+    }
+
+    #[test]
+    fn duplicate_names_pair_up_in_order() {
+        let mut s = bent_session(&["Mic", "Mic"]);
+        s.tracks[0].gain_db = -1.0;
+        s.tracks[1].gain_db = -2.0;
+        let take = [info(5, "Mic"), info(6, "Mic")];
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert_eq!(applied.session.tracks[0].gain_db, -1.0);
+        assert_eq!(applied.session.tracks[1].gain_db, -2.0);
+        assert!(applied.report.missing.is_empty());
+    }
+
+    #[test]
+    fn a_template_from_another_setup_matches_nothing() {
+        let t = Template::from_session(&bent_session(&["A"]));
+        // Index 0 means "unknown" and must never match anything either.
+        let mut t0 = t.clone();
+        t0.tracks[0].index = 0;
+        let applied = apply_template(&t0, &[info(1, "Z")], UnknownTracks::Include);
+        assert!(applied.report.matched_nothing());
+        assert_eq!(applied.report.missing, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn sparse_template_from_another_tool_loads_with_defaults() {
+        let json = r#"{
+            "schema": "mixstack.mix/1",
+            "tracks": [ { "name": "Vox", "gain_db": -4.0, "tags": ["vocals"], "future_field": 1 } ],
+            "settings": { "loudness": { "LufsIntegrated": -14.0 } },
+            "something_new": { "x": 1 }
+        }"#;
+        let t = Template::from_json(json).unwrap();
+        let tr = &t.tracks[0];
+        assert_eq!(tr.gain_db, -4.0);
+        assert!(tr.in_mix && !tr.muted && tr.pan == 0.0 && !tr.eq.is_active());
+        assert!(t.settings.limiter_enabled);
+        assert_eq!(t.settings.ceiling_dbtp, -1.0);
+        let applied = apply_template(&t, &[info(3, "Vox")], UnknownTracks::Exclude);
+        assert_eq!(applied.tags[0], vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn foreign_or_future_schemas_are_refused() {
+        assert!(Template::from_json(r#"{"schema":"mixstack.mix/2"}"#).is_err());
+        assert!(Template::from_json(r#"{"schema":"other/1"}"#).is_err());
+        assert!(Template::from_json(r#"{"tracks":[]}"#).is_err());
+    }
+
+    #[test]
+    fn a_stored_session_is_accepted_wherever_a_template_is() {
+        let s = bent_session(&["Vox", "Bass"]);
+        let t = Template::from_template_or_session_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(t, Template::from_session(&s));
+        let tpl = Template::from_session(&s).to_json().unwrap();
+        assert_eq!(
+            Template::from_template_or_session_json(&tpl).unwrap(),
+            Template::from_session(&s)
+        );
+        assert!(Template::from_template_or_session_json("{}").is_err());
+    }
+
+    #[test]
+    fn tags_survive_apply_then_save() {
+        let s = bent_session(&["Vox", "Bass"]);
+        let t = Template::from_session_with_tags(&s, &[vec!["vocals".into()], vec!["bass".into()]]);
+        // Swap the order in the take; tags must follow the track, not the slot.
+        let applied = apply_template(
+            &t,
+            &[info(1, "Bass"), info(2, "Vox")],
+            UnknownTracks::Exclude,
+        );
+        let again = Template::from_session_with_tags(&applied.session, &applied.tags);
+        assert_eq!(again.tracks[0].name, "Bass");
+        assert_eq!(again.tracks[0].tags, vec!["bass".to_string()]);
+        assert_eq!(again.tracks[1].tags, vec!["vocals".to_string()]);
+    }
+
+    #[test]
+    fn mapping_is_linear_in_the_channel_count() {
+        // Not a benchmark — a guard against a quadratic search sneaking back
+        // in: 4000 tracks, every one renamed so all three rounds run.
+        let n = 4000;
+        let tracks: Vec<TrackParams> = (1..=n)
+            .map(|i| TrackParams::new(i, format!("T{i}"), 0.0))
+            .collect();
+        let s = Session {
+            tracks,
+            ..Session::default()
+        };
+        let take: Vec<_> = (1..=n).map(|i| info(i, &format!("R{i}"))).collect();
+        let t0 = std::time::Instant::now();
+        let applied = apply_template(&Template::from_session(&s), &take, UnknownTracks::Exclude);
+        assert!(t0.elapsed().as_secs_f64() < 1.0, "{:?}", t0.elapsed());
+        assert!(applied
+            .report
+            .matched
+            .iter()
+            .all(|m| m.by == MatchedBy::Index));
+    }
+}
+
+// ── headless entry points (#165) ────────────────────────────────────────────
+
+mod headless_tests {
+    use super::{wav16, DUREC_IXML};
+    use durecmix_engine::headless::{
+        self, apply_render_options, open_take, prepare_session, render_template, seconds_to_frame,
+        HeadlessError, RenderOptions,
+    };
+    use durecmix_engine::ixml::tracks_or_channels;
+    use durecmix_engine::render::{
+        render_to_file, LoudnessMode, OutputFormat, RenderSettings, MP3_CBR_KBPS,
+    };
+    use durecmix_engine::session::Session;
+    use durecmix_engine::sink::validate_format;
+    use durecmix_engine::template::{Template, UnknownTracks};
+
+    /// 3-channel 48 kHz take, 2 s, the DUREC iXML (Vocals, Drums OH L/R).
+    fn take_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let frames = 96_000;
+        let mut samples = Vec::with_capacity(frames * 3);
+        for n in 0..frames {
+            let t = n as f64 / 48_000.0;
+            for (ch, f) in [440.0, 97.0, 1500.0].iter().enumerate() {
+                let a = [0.3, 0.2, 0.1][ch];
+                samples.push((a * (std::f64::consts::TAU * f * t).sin() * 32767.0) as i16);
+            }
+        }
+        let p = dir.join("take.wav");
+        std::fs::write(&p, wav16(3, 48_000, &samples, Some(DUREC_IXML))).unwrap();
+        p
+    }
+
+    #[test]
+    fn take_without_ixml_gets_one_track_per_channel() {
+        let t = tracks_or_channels(None, 3);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[2].name, "Channel 3");
+        assert_eq!(t[2].index, 3);
+        assert_eq!(tracks_or_channels(Some(DUREC_IXML), 3)[0].name, "Vocals");
+        assert_eq!(
+            tracks_or_channels(Some("<?xml garbage"), 2)[1].name,
+            "Channel 2"
+        );
+    }
+
+    #[test]
+    fn seconds_round_to_the_nearest_frame() {
+        assert_eq!(seconds_to_frame(2.8, 44_100), 123_480);
+        assert_eq!(seconds_to_frame(1.0 / 44_100.0 * 0.6, 44_100), 1);
+        assert_eq!(seconds_to_frame(0.0, 48_000), 0);
+    }
+
+    #[test]
+    fn render_options_become_trim_frames_and_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let take = open_take(&take_file(dir.path())).unwrap();
+        let mut s = RenderSettings::default();
+        let opts = RenderOptions {
+            start_seconds: Some(0.25),
+            end_seconds: Some(99.0),
+            fade_in_ms: 10.0,
+            loudness: Some(LoudnessMode::LufsIntegrated(-14.0)),
+            ..RenderOptions::default()
+        };
+        apply_render_options(&mut s, &take, &opts).unwrap();
+        assert_eq!(s.trim_start_frame, 12_000);
+        assert_eq!(
+            s.trim_end_frame, None,
+            "an end past the take is the take's end"
+        );
+        assert_eq!(s.loudness, LoudnessMode::LufsIntegrated(-14.0));
+        for bad in [
+            RenderOptions {
+                start_seconds: Some(2.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                start_seconds: Some(-1.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                start_seconds: Some(1.0),
+                end_seconds: Some(1.0),
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                fade_out_ms: f64::NAN,
+                ..RenderOptions::default()
+            },
+            RenderOptions {
+                format: OutputFormat::Mp3,
+                mp3_bitrate_kbps: 100,
+                ..RenderOptions::default()
+            },
+        ] {
+            let err =
+                apply_render_options(&mut RenderSettings::default(), &take, &bad).unwrap_err();
+            assert!(matches!(err, HeadlessError::Usage(_)), "{bad:?} → {err:?}");
+        }
+    }
+
+    #[test]
+    fn template_to_session_to_render_equals_rendering_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = take_file(dir.path());
+        let take = open_take(&wav).unwrap();
+        let mut session = Session::from_track_info(&take.tracks);
+        session.tracks[0].gain_db = -2.0;
+        session.tracks[0].eq.hpf_enabled = true;
+        session.tracks[2].pan = 0.3;
+        session.settings.loudness = LoudnessMode::LufsIntegrated(-18.0);
+
+        let opts = RenderOptions {
+            start_seconds: Some(0.1),
+            end_seconds: Some(1.9),
+            fade_out_ms: 200.0,
+            format: OutputFormat::Flac24,
+            ..RenderOptions::default()
+        };
+        let via_template = dir.path().join("t.flac");
+        let out = render_template(
+            &take,
+            &Template::from_session(&session),
+            &opts,
+            &via_template,
+            false,
+            "test",
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(out.schema, headless::RENDER_SCHEMA);
+
+        let mut direct = session.clone();
+        apply_render_options(&mut direct.settings, &take, &opts).unwrap();
+        let direct_path = dir.path().join("d.flac");
+        render_to_file(&wav, &direct.tracks, &direct.settings, &direct_path, |_| {}).unwrap();
+        assert_eq!(
+            std::fs::read(via_template).unwrap(),
+            std::fs::read(direct_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_template_matching_nothing_is_refused_before_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let take = open_take(&take_file(dir.path())).unwrap();
+        let t = Template::from_json(r#"{"schema":"mixstack.mix/1","tracks":[{"name":"Tuba"}]}"#)
+            .unwrap();
+        let err = prepare_session(&t, &take, &RenderOptions::default()).unwrap_err();
+        assert!(matches!(err, HeadlessError::NoMatch(_)));
+        // …unless the caller asks for unknown tracks to be included, which
+        // still matches nothing: the refusal is about the template.
+        let opts = RenderOptions {
+            unknown: UnknownTracks::Include,
+            ..RenderOptions::default()
+        };
+        assert!(matches!(
+            prepare_session(&t, &take, &opts),
+            Err(HeadlessError::NoMatch(_))
+        ));
+    }
+
+    #[test]
+    fn mp3_bitrates_outside_the_cbr_set_are_refused() {
+        for kbps in MP3_CBR_KBPS {
+            validate_format(OutputFormat::Mp3, 44_100, kbps).unwrap();
+        }
+        assert!(validate_format(OutputFormat::Mp3, 44_100, 100).is_err());
+        assert!(validate_format(OutputFormat::Mp3, 44_100, 0).is_err());
+        // Ignored for every other format.
+        validate_format(OutputFormat::Wav24, 44_100, 0).unwrap();
+    }
+
+    #[test]
+    fn sessions_from_before_the_bitrate_field_keep_320() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&Session::default().to_json().unwrap()).unwrap();
+        v["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mp3_bitrate_kbps");
+        let s: Session = serde_json::from_value(v).unwrap();
+        assert_eq!(s.settings.mp3_bitrate_kbps, 320);
+    }
+}
+
+// ── measurement (#166) ──────────────────────────────────────────────────────
+
+mod measure_tests {
+    use super::{chunk, fmt_payload};
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::measure::{
+        compare, measure, spreading_db, LevelPoint, MaskingMode, MeasureJob, MeasureOptions,
+        Measurement, TrackSelection, MAX_PAIR_TRACKS,
+    };
+    use durecmix_engine::render::{analyze_mix_level, LoudnessMode, RenderSettings};
+    use durecmix_engine::session::Session;
+    use durecmix_engine::wav::InputHandle;
+    use durecmix_engine::EngineError;
+    use std::f64::consts::TAU;
+
+    const SR: u32 = 48_000;
+
+    fn noise(seed: &mut u64) -> f64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    }
+
+    fn sine(freq: f64, dbfs: f64, secs: f64) -> Vec<f64> {
+        let a = 10f64.powf(dbfs / 20.0);
+        (0..(secs * SR as f64) as usize)
+            .map(|n| a * (TAU * freq * n as f64 / SR as f64).sin())
+            .collect()
+    }
+
+    /// White noise with the given RMS in dBFS.
+    fn white(rms_dbfs: f64, secs: f64, seed: u64) -> Vec<f64> {
+        let mut s = seed;
+        // Uniform on [−1, 1] has RMS 1/√3.
+        let a = 10f64.powf(rms_dbfs / 20.0) * 3f64.sqrt();
+        (0..(secs * SR as f64) as usize)
+            .map(|_| a * noise(&mut s))
+            .collect()
+    }
+
+    /// 24-bit take with one channel per signal and iXML names T1, T2, ….
+    fn take(dir: &std::path::Path, signals: &[Vec<f64>]) -> (InputHandle, Vec<TrackInfo>) {
+        let ch = signals.len();
+        let frames = signals[0].len();
+        let mut data = Vec::with_capacity(frames * ch * 3);
+        for n in 0..frames {
+            for s in signals {
+                let v = (s[n].clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
+                data.extend_from_slice(&v.to_le_bytes()[0..3]);
+            }
+        }
+        let mut tracks = String::new();
+        for i in 1..=ch {
+            tracks.push_str(&format!(
+                "<TRACK><INTERLEAVE_INDEX>{i}</INTERLEAVE_INDEX><NAME>T{i}</NAME></TRACK>"
+            ));
+        }
+        let ixml =
+            format!("<?xml version=\"1.0\"?><BWFXML><TRACK_LIST>{tracks}</TRACK_LIST></BWFXML>");
+        let mut body = b"WAVE".to_vec();
+        body.extend(chunk(b"fmt ", &fmt_payload(1, ch as u16, SR, 24)));
+        body.extend(chunk(b"data", &data));
+        body.extend(chunk(b"iXML", ixml.as_bytes()));
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend(body);
+        let p = dir.join("take.wav");
+        std::fs::write(&p, file).unwrap();
+        let infos = (1..=ch as u32)
+            .map(|i| TrackInfo {
+                index: i,
+                name: format!("T{i}"),
+            })
+            .collect();
+        (InputHandle::Path(p.to_string_lossy().into_owned()), infos)
+    }
+
+    fn run(input: &InputHandle, s: &Session, opts: &MeasureOptions) -> Measurement {
+        measure(
+            input,
+            &[MeasureJob {
+                tracks: &s.tracks,
+                tags: &[],
+                settings: &s.settings,
+            }],
+            opts,
+            |_| {},
+        )
+        .unwrap()
+        .remove(0)
+    }
+
+    fn band(m: &Measurement, hz: f64) -> usize {
+        m.bands_hz.iter().position(|&b| b == hz).unwrap()
+    }
+
+    #[test]
+    fn ebu_tech_3341_case_1_stereo_sine_reads_minus_23_lufs() {
+        // Tech 3341 test 1: 1 kHz sine at −23 dBFS in both channels → −23.0
+        // LUFS ±0.1. Two hard-panned tracks rebuild the stereo file exactly.
+        let dir = tempfile::tempdir().unwrap();
+        let s = sine(1000.0, -23.0, 20.0);
+        let (input, infos) = take(dir.path(), &[s.clone(), s]);
+        let mut session = Session::from_track_info(&infos);
+        session.tracks[0].pan = -1.0;
+        session.tracks[1].pan = 1.0;
+        let m = run(&input, &session, &MeasureOptions::default());
+        assert!(
+            (m.mix.level.lufs_i + 23.0).abs() < 0.1,
+            "{}",
+            m.mix.level.lufs_i
+        );
+        assert!((m.mix.level.sample_peak_dbfs + 23.0).abs() < 0.01);
+        assert!((m.mix.level.true_peak_dbtp + 23.0).abs() < 0.2);
+        assert!(m.mix.level.lra < 0.5);
+        assert!((m.mix.level.short_term_lufs.p50 + 23.0).abs() < 0.1);
+        // A sine's crest factor is 3.01 dB, its PLR here 0 LU.
+        assert!(
+            (m.mix.level.crest_db - 3.01).abs() < 0.05,
+            "{}",
+            m.mix.level.crest_db
+        );
+        assert!(m.mix.level.plr_db.abs() < 0.2);
+        // Identical channels: fully correlated, no side signal.
+        assert!((m.mix.correlation - 1.0).abs() < 1e-9);
+        assert!(m.mix.width < 1e-6);
+        assert!((m.mix.level.active_fraction - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn a_sine_lands_in_its_third_octave_band_at_its_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(1000.0, -20.0, 5.0), sine(100.0, -12.0, 5.0)],
+        );
+        let session = Session::from_track_info(&infos);
+        let opts = MeasureOptions {
+            point: LevelPoint::PreFader,
+            ..MeasureOptions::default()
+        };
+        let m = run(&input, &session, &opts);
+        let t1 = &m.tracks[0].level.ltas_db;
+        // AES17: a sine of peak −20 dBFS reads −20 dB in its band.
+        assert!(
+            (t1[band(&m, 1000.0)] + 20.0).abs() < 0.3,
+            "{}",
+            t1[band(&m, 1000.0)]
+        );
+        assert!(t1[band(&m, 500.0)] < -60.0 && t1[band(&m, 2000.0)] < -60.0);
+        let t2 = &m.tracks[1].level.ltas_db;
+        // 100 Hz is resolved coarsely (bins are 23 Hz) but the energy stays put.
+        let near: f64 = [80.0, 100.0, 125.0]
+            .iter()
+            .map(|&f| 10f64.powf(t2[band(&m, f)] / 10.0))
+            .sum();
+        assert!(
+            (10.0 * near.log10() + 12.0).abs() < 0.5,
+            "{}",
+            10.0 * near.log10()
+        );
+        assert_eq!(m.bands_hz.len(), 30);
+        assert_eq!(m.bands_hz[0], 25.0);
+        assert!((m.frame_seconds - 2048.0 / 48_000.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_mix_is_the_bus_render_pass_1_measures() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[
+                sine(220.0, -14.0, 4.0),
+                white(-24.0, 4.0, 7),
+                sine(3000.0, -30.0, 4.0),
+            ],
+        );
+        let mut session = Session::from_track_info(&infos);
+        session.tracks[0].gain_db = -3.0;
+        session.tracks[1].eq.hpf_enabled = true;
+        session.tracks[2].pan = 0.4;
+        session.settings.trim_start_frame = 4_800;
+        session.settings.trim_end_frame = Some(150_000);
+        session.settings.loudness = LoudnessMode::LufsIntegrated(-16.0);
+        let m = run(&input, &session, &MeasureOptions::default());
+        let level = analyze_mix_level(&input, &session.tracks, &session.settings, |_| {}).unwrap();
+        assert!((m.mix.level.lufs_i - level.integrated_lufs).abs() < 1e-9);
+        assert!((m.mix.level.sample_peak_dbfs - 20.0 * level.peak.log10()).abs() < 1e-9);
+        // The predicted gain is the render's own formula on those numbers.
+        assert!(
+            (m.mix.normalisation_gain_db.unwrap() - (-16.0 - level.integrated_lufs)).abs() < 1e-9
+        );
+        assert!((m.range.start - 0.1).abs() < 1e-12 && (m.range.end - 3.125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_track_under_loud_noise_in_its_band_is_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(1000.0, -40.0, 4.0), white(-3.0, 4.0, 1)]);
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let mask = m.tracks[0].masking.as_ref().unwrap();
+        let b = band(&m, 1000.0);
+        assert!(mask.msr_db[b].unwrap() > 0.0, "{:?}", mask.msr_db[b]);
+        assert!(mask.masked_time_fraction[b].unwrap() > 0.95);
+        assert!(mask.m_index > 0.0);
+        // The noise itself is not masked by a quiet sine.
+        let noise_mask = m.tracks[1].masking.as_ref().unwrap();
+        assert_eq!(noise_mask.masked_time_fraction[b], Some(0.0));
+    }
+
+    #[test]
+    fn tracks_in_separate_bands_do_not_mask_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(5000.0, -30.0, 4.0), sine(100.0, -6.0, 4.0)],
+        );
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let mask = m.tracks[0].masking.as_ref().unwrap();
+        assert_eq!(mask.masked_time_fraction[band(&m, 5000.0)], Some(0.0));
+        assert!(mask.msr_db[band(&m, 5000.0)].unwrap() < -40.0);
+        assert_eq!(mask.masked_fraction, 0.0);
+        // Bands where the track has nothing are not counted at all.
+        assert_eq!(mask.msr_db[band(&m, 250.0)], None);
+    }
+
+    #[test]
+    fn lowering_the_masker_reduces_masking() {
+        // The closed loop in miniature: one measure → change → measure step.
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(1000.0, -30.0, 4.0), white(-3.0, 4.0, 1)]);
+        let a = Session::from_track_info(&infos);
+        let mut b = a.clone();
+        b.tracks[1].gain_db = -20.0;
+        let out = measure(
+            &input,
+            &[
+                MeasureJob {
+                    tracks: &a.tracks,
+                    tags: &[],
+                    settings: &a.settings,
+                },
+                MeasureJob {
+                    tracks: &b.tracks,
+                    tags: &[],
+                    settings: &b.settings,
+                },
+            ],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        let mut it = out.into_iter();
+        let c = compare(it.next().unwrap(), it.next().unwrap()).unwrap();
+        let t1 = &c.delta.tracks[0];
+        assert!(t1.masking.as_ref().unwrap().masked_fraction < -0.5);
+        assert!(t1.level.lufs_i.abs() < 1e-9, "T1 itself did not change");
+        let t2 = &c.delta.tracks[1];
+        assert!((t2.level.lufs_i + 20.0).abs() < 0.01, "{}", t2.level.lufs_i);
+        assert!(c.delta.mix.level.lufs_i < -10.0);
+    }
+
+    #[test]
+    fn comparing_a_mix_with_itself_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(440.0, -20.0, 3.0), white(-30.0, 3.0, 3)]);
+        let s = Session::from_track_info(&infos);
+        let a = run(&input, &s, &MeasureOptions::default());
+        let c = compare(a.clone(), a).unwrap();
+        assert_eq!(c.delta.mix.level.lufs_i, 0.0);
+        assert!(c.delta.mix.level.ltas_db.iter().all(|v| *v == 0.0));
+        assert!(c.delta.tracks.iter().all(|t| t.level.lufs_i == 0.0));
+    }
+
+    #[test]
+    fn activity_starts_where_the_track_starts_playing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = vec![0.0; SR as usize * 2];
+        s.extend(sine(440.0, -18.0, 3.0));
+        let (input, infos) = take(dir.path(), &[s]);
+        let m = run(
+            &input,
+            &Session::from_track_info(&infos),
+            &MeasureOptions::default(),
+        );
+        let l = &m.tracks[0].level;
+        assert!(
+            (l.first_active_s.unwrap() - 2.0).abs() < 0.2,
+            "{:?}",
+            l.first_active_s
+        );
+        assert!(
+            (l.last_active_s.unwrap() - 5.0).abs() < 0.15,
+            "{:?}",
+            l.last_active_s
+        );
+        assert!(
+            (l.active_fraction - 0.6).abs() < 0.05,
+            "{}",
+            l.active_fraction
+        );
+    }
+
+    #[test]
+    fn post_fader_figures_follow_the_fader_and_pre_fader_ones_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[sine(440.0, -20.0, 3.0), sine(880.0, -20.0, 3.0)],
+        );
+        let mut s = Session::from_track_info(&infos);
+        s.tracks[0].gain_db = -6.0;
+        s.tracks[1].muted = true;
+        let post = run(
+            &input,
+            &s,
+            &MeasureOptions {
+                tracks: TrackSelection::All,
+                ..Default::default()
+            },
+        );
+        let pre = run(
+            &input,
+            &s,
+            &MeasureOptions {
+                tracks: TrackSelection::All,
+                point: LevelPoint::PreFader,
+                ..Default::default()
+            },
+        );
+        assert!(
+            (pre.tracks[0].level.lufs_i - post.tracks[0].level.lufs_i - 6.0).abs() < 0.05 + 3.1
+        );
+        assert!(!post.tracks[1].in_mix);
+        assert!(
+            post.tracks[1].level.lufs_i.is_infinite(),
+            "muted contributes nothing"
+        );
+        assert!(post.tracks[1].masking.is_none());
+        assert!(
+            pre.tracks[1].level.lufs_i.is_finite(),
+            "but pre-fader it has signal"
+        );
+        // Selection "mix" leaves the muted track out entirely.
+        let mix = run(&input, &s, &MeasureOptions::default());
+        assert_eq!(mix.tracks.len(), 1);
+    }
+
+    #[test]
+    fn pairs_and_names_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(
+            dir.path(),
+            &[
+                sine(1000.0, -30.0, 2.0),
+                white(-3.0, 2.0, 1),
+                sine(200.0, -20.0, 2.0),
+            ],
+        );
+        let s = Session::from_track_info(&infos);
+        let pairs = MeasureOptions {
+            tracks: TrackSelection::Names(vec!["T1".into()]),
+            masking: MaskingMode::Pairs(vec!["T1".into(), "T2".into(), "T3".into()]),
+            ..Default::default()
+        };
+        let m = run(&input, &s, &pairs);
+        assert_eq!(m.pairs.len(), 6);
+        let t1_by_t2 = m
+            .pairs
+            .iter()
+            .find(|p| p.maskee == "T1" && p.masker == "T2")
+            .unwrap();
+        let t1_by_t3 = m
+            .pairs
+            .iter()
+            .find(|p| p.maskee == "T1" && p.masker == "T3")
+            .unwrap();
+        assert!(t1_by_t2.masked_fraction > t1_by_t3.masked_fraction);
+        assert_eq!(m.tracks.len(), 3, "pair tracks are measured too");
+
+        let bad = |opts: MeasureOptions| {
+            measure(
+                &input,
+                &[MeasureJob {
+                    tracks: &s.tracks,
+                    tags: &[],
+                    settings: &s.settings,
+                }],
+                &opts,
+                |_| {},
+            )
+            .unwrap_err()
+        };
+        assert!(matches!(
+            bad(MeasureOptions {
+                tracks: TrackSelection::Names(vec!["Nope".into()]),
+                ..Default::default()
+            }),
+            EngineError::InvalidRequest(_)
+        ));
+        let many = (0..=MAX_PAIR_TRACKS).map(|i| format!("T{i}")).collect();
+        assert!(matches!(
+            bad(MeasureOptions {
+                masking: MaskingMode::Pairs(many),
+                ..Default::default()
+            }),
+            EngineError::InvalidRequest(_)
+        ));
+    }
+
+    #[test]
+    fn spreading_function_has_the_classic_slopes() {
+        assert!(spreading_db(0.0).abs() < 0.05);
+        // ≈ −10 dB/Bark towards higher bands, ≈ −25 dB/Bark towards lower.
+        // (asymptotes; at dz = ±4…5 the slopes are −9.6 and −24.4 dB/Bark).
+        assert!(((spreading_db(5.0) - spreading_db(4.0)) + 10.0).abs() < 1.0);
+        assert!(((spreading_db(-5.0) - spreading_db(-4.0)) + 25.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn tags_and_mixed_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, infos) = take(dir.path(), &[sine(440.0, -20.0, 2.0)]);
+        let s = Session::from_track_info(&infos);
+        let tags = vec![vec!["gesang".to_string()]];
+        let m = measure(
+            &input,
+            &[MeasureJob {
+                tracks: &s.tracks,
+                tags: &tags,
+                settings: &s.settings,
+            }],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(m[0].tracks[0].tags, tags[0]);
+        let mut other = s.clone();
+        other.settings = RenderSettings {
+            trim_start_frame: 10,
+            ..RenderSettings::default()
+        };
+        assert!(measure(
+            &input,
+            &[
+                MeasureJob {
+                    tracks: &s.tracks,
+                    tags: &[],
+                    settings: &s.settings
+                },
+                MeasureJob {
+                    tracks: &other.tracks,
+                    tags: &[],
+                    settings: &other.settings
+                },
+            ],
+            &MeasureOptions::default(),
+            |_| {},
+        )
+        .is_err());
+    }
+}
+
+// ── mix editing by operations (#167) ────────────────────────────────────────
+
+mod edit_tests {
+    use durecmix_engine::edit::{apply_ops, EditLimits, EqBandName, MixHistory, MixOp, TrackRef};
+    use durecmix_engine::ixml::TrackInfo;
+    use durecmix_engine::session::Session;
+    use durecmix_engine::EngineError;
+
+    fn session() -> Session {
+        Session::from_track_info(
+            &["Vox", "Bass", "Keys L", "Keys R"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| TrackInfo {
+                    index: i as u32 + 1,
+                    name: n.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn name(n: &str) -> TrackRef {
+        TrackRef::Name(n.into())
+    }
+
+    #[test]
+    fn operations_apply_in_order_and_log_what_they_did() {
+        let ops = vec![
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.0,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::Mid,
+                enabled: None,
+                gain_db: Some(-2.5),
+                freq: Some(2500.0),
+                q: None,
+            },
+            MixOp::SetHpf {
+                track: TrackRef::Index(2),
+                enabled: None,
+                freq: Some(40.0),
+                slope_db_per_octave: Some(24),
+            },
+            MixOp::SetPan {
+                track: name("Keys L"),
+                pan: -0.7,
+            },
+            MixOp::SetMute {
+                track: name("Keys R"),
+                muted: true,
+            },
+            MixOp::SetPolarity {
+                track: name("Bass"),
+                invert: true,
+            },
+        ];
+        let (s, log) = apply_ops(&session(), &ops, &EditLimits::default()).unwrap();
+        assert_eq!(s.tracks[0].gain_db, -3.0);
+        assert!(
+            s.tracks[0].eq.mid.enabled,
+            "setting a gain enables the band"
+        );
+        assert_eq!(s.tracks[0].eq.mid.freq, 2500.0);
+        assert!(s.tracks[1].eq.hpf_enabled && s.tracks[1].eq.hpf_freq == 40.0);
+        assert!(s.tracks[1].polarity_invert);
+        assert_eq!(s.tracks[2].pan, -0.7);
+        assert!(s.tracks[3].muted);
+        assert_eq!(log.len(), 6);
+        assert_eq!(log[0].name, "Vox");
+        assert!(log[0].change.contains("-3.00"), "{}", log[0].change);
+    }
+
+    #[test]
+    fn the_apps_ranges_are_enforced_and_a_failing_batch_changes_nothing() {
+        let base = session();
+        for bad in [
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: 7.0,
+            },
+            MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: f64::NAN,
+            },
+            MixOp::SetPan {
+                track: name("Vox"),
+                pan: 1.5,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::High,
+                enabled: None,
+                gain_db: Some(16.0),
+                freq: None,
+                q: None,
+            },
+            MixOp::SetEq {
+                track: name("Vox"),
+                band: EqBandName::Low,
+                enabled: None,
+                gain_db: None,
+                freq: Some(1000.0),
+                q: None,
+            },
+            MixOp::SetHpf {
+                track: name("Vox"),
+                enabled: None,
+                freq: Some(800.0),
+                slope_db_per_octave: None,
+            },
+            MixOp::SetHpf {
+                track: name("Vox"),
+                enabled: None,
+                freq: None,
+                slope_db_per_octave: Some(18),
+            },
+            MixOp::SetGain {
+                track: name("Nobody"),
+                gain_db: 0.0,
+            },
+            MixOp::SetGain {
+                track: TrackRef::Index(99),
+                gain_db: 0.0,
+            },
+        ] {
+            let ops = [
+                MixOp::SetGain {
+                    track: name("Bass"),
+                    gain_db: -1.0,
+                },
+                bad.clone(),
+            ];
+            let err = apply_ops(&base, &ops, &EditLimits::default()).unwrap_err();
+            match err {
+                EngineError::InvalidRequest(m) => assert!(m.starts_with("operation 1"), "{m}"),
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+        assert!(apply_ops(&base, &[], &EditLimits::default()).is_err());
+    }
+
+    #[test]
+    fn caller_limits_narrow_the_ranges() {
+        let limits = EditLimits {
+            max_eq_gain_db: Some(6.0),
+            max_gain_step_db: Some(3.0),
+            ..EditLimits::default()
+        };
+        let eq = |g| MixOp::SetEq {
+            track: name("Vox"),
+            band: EqBandName::Mid,
+            enabled: None,
+            gain_db: Some(g),
+            freq: None,
+            q: None,
+        };
+        assert!(apply_ops(&session(), &[eq(6.0)], &limits).is_ok());
+        assert!(apply_ops(&session(), &[eq(6.5)], &limits).is_err());
+        assert!(apply_ops(
+            &session(),
+            &[MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.0
+            }],
+            &limits
+        )
+        .is_ok());
+        assert!(apply_ops(
+            &session(),
+            &[MixOp::SetGain {
+                track: name("Vox"),
+                gain_db: -3.5
+            }],
+            &limits
+        )
+        .is_err());
+        let json = r#"{"max_eq_gain_db": 6, "gain_db": [-30, 0], "unknown": 1}"#;
+        assert!(
+            serde_json::from_str::<EditLimits>(json).is_err(),
+            "a typo in a limits file must not pass silently"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_must_be_addressed_by_index() {
+        let mut s = session();
+        s.tracks[3].name = "Keys L".into();
+        let op = MixOp::SetGain {
+            track: name("Keys L"),
+            gain_db: -1.0,
+        };
+        assert!(apply_ops(&s, &[op], &EditLimits::default()).is_err());
+        let op = MixOp::SetGain {
+            track: TrackRef::Index(4),
+            gain_db: -1.0,
+        };
+        assert_eq!(
+            apply_ops(&s, &[op], &EditLimits::default())
+                .unwrap()
+                .0
+                .tracks[3]
+                .gain_db,
+            -1.0
+        );
+    }
+
+    #[test]
+    fn operations_parse_from_the_json_an_agent_sends() {
+        let ops: Vec<MixOp> = serde_json::from_str(
+            r#"[{"op":"set_gain","track":"Vox","gain_db":-2},
+                {"op":"set_eq","track":3,"band":"high","gain_db":1.5},
+                {"op":"set_in_mix","track":"Bass","in_mix":false}]"#,
+        )
+        .unwrap();
+        assert_eq!(ops[1].track(), &TrackRef::Index(3));
+        assert!(serde_json::from_str::<MixOp>(r#"{"op":"set_volume","track":"Vox"}"#).is_err());
+    }
+
+    #[test]
+    fn history_keeps_every_revision_and_revert_appends() {
+        let mut h = MixHistory::new(session(), vec![], "load");
+        assert_eq!(h.current(), 0);
+        let (r1, _) = h
+            .update(
+                &[MixOp::SetGain {
+                    track: name("Vox"),
+                    gain_db: -6.0,
+                }],
+                &EditLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(r1, 1);
+        assert!(h
+            .update(
+                &[MixOp::SetGain {
+                    track: name("Vox"),
+                    gain_db: 9.0
+                }],
+                &EditLimits::default()
+            )
+            .is_err());
+        assert_eq!(h.current(), 1, "a refused update adds no revision");
+        let r2 = h.revert(0).unwrap();
+        assert_eq!(r2, 2);
+        assert_eq!(h.get(2).unwrap().session, h.get(0).unwrap().session);
+        assert_eq!(
+            h.get(1).unwrap().session.tracks[0].gain_db,
+            -6.0,
+            "the reverted step is still there"
+        );
+        assert!(h.get(7).is_err() && h.revert(7).is_err());
     }
 }

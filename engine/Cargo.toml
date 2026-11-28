@@ -20,6 +20,9 @@ mp3lame-encoder = { version = "0.2.4", optional = true }
 shine-rs = { version = "0.1.3", optional = true, default-features = false }
 realfft = "3"
 symphonia = { version = "0.6", features = ["mp3"] }
+# JSON Schemas of the public result types, for the MCP server's
+# outputSchema (cli/, feature `mcp`). Off for the app and the browser.
+schemars = { version = "1", optional = true }
 
 [features]
 # Native builds keep today's full engine. The wasm32 PWA builds without
@@ -36,6 +39,8 @@ mp3-shine = ["mp3-any", "dep:shine-rs"]
 # Marker: some MP3 encoder is compiled in. Lets `sink.rs` keep asking one
 # question instead of listing every encoder at each of its four cfg sites.
 mp3-any = []
+# Derive JSON Schemas for the headless contracts (cli/src/mcp).
+schema = ["dep:schemars"]
 
 [[example]]
 name = "play_demo"

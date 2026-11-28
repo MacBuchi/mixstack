@@ -19,7 +19,7 @@ use crate::mix::{resolve_channels, HpfSlope, TrackEq, TrackParams};
 /// Stateful EQ for one source channel. Fixed slots so state can be adopted
 /// role-by-role when parameters change.
 #[derive(Debug, Clone, Copy, Default)]
-struct EqChain {
+pub(crate) struct EqChain {
     hpf1: Option<Biquad>,
     hpf2: Option<Biquad>,
     low: Option<Biquad>,
@@ -28,7 +28,7 @@ struct EqChain {
 }
 
 impl EqChain {
-    fn new(eq: &TrackEq, sr: f64) -> Self {
+    pub(crate) fn new(eq: &TrackEq, sr: f64) -> Self {
         let mut chain = Self::default();
         if eq.hpf_enabled {
             match eq.hpf_slope {
@@ -81,7 +81,7 @@ impl EqChain {
     }
 
     #[inline]
-    fn process(&mut self, mut x: f64) -> f64 {
+    pub(crate) fn process(&mut self, mut x: f64) -> f64 {
         if let Some(b) = &mut self.hpf1 {
             x = b.process(x);
         }

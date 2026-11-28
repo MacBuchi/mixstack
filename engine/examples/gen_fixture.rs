@@ -18,12 +18,12 @@
 
 use std::f64::consts::TAU;
 
-const SAMPLE_RATE: u32 = 44_100;
-const SECONDS: u32 = 5;
-const CHANNELS: usize = 8;
+pub const SAMPLE_RATE: u32 = 44_100;
+pub const SECONDS: u32 = 5;
+pub const CHANNELS: usize = 8;
 const FULL_SCALE: f64 = 8_388_607.0; // 24-bit
 
-const TRACKS: [(&str, f64, f64); CHANNELS] = [
+pub const TRACKS: [(&str, f64, f64); CHANNELS] = [
     ("Vocals", 440.0, -12.0),
     ("Kick", 55.0, -6.0),
     ("Keys L", 330.0, -18.0),
@@ -62,11 +62,10 @@ fn ixml() -> String {
     )
 }
 
-fn main() {
-    let out_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "fixture_8ch.wav".into());
-
+/// The fixture as bytes. Integration tests outside this crate (`cli/tests`)
+/// include this file with `#[path]` and call this directly, so every test
+/// fixture comes out of one generator.
+pub fn fixture_bytes() -> Vec<u8> {
     let frames = (SAMPLE_RATE * SECONDS) as usize;
     let mut data = Vec::with_capacity(frames * CHANNELS * 3);
     for n in 0..frames {
@@ -97,7 +96,15 @@ fn main() {
     file.extend_from_slice(b"RIFF");
     file.extend_from_slice(&(body.len() as u32).to_le_bytes());
     file.extend(body);
+    file
+}
 
+#[allow(dead_code)] // unused where tests include this file as a module
+fn main() {
+    let out_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "fixture_8ch.wav".into());
+    let file = fixture_bytes();
     std::fs::write(&out_path, &file).expect("write fixture");
     println!(
         "wrote {out_path}: {CHANNELS} ch, 24-bit, {SAMPLE_RATE} Hz, {SECONDS} s ({} bytes)",

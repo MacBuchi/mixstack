@@ -1,7 +1,10 @@
 //! The streaming MP3 writer — one type, two encoders.
 //!
-//! Native targets encode with LAME (`mp3lame-encoder`), CBR 320 kbps at best
-//! quality, for parity with the Python tool's exports. LAME is C with an
+//! Native targets encode with LAME (`mp3lame-encoder`), CBR at best quality
+//! — 320 kbps for parity with the Python tool's exports unless the caller
+//! picks a lower rate (the band player streams 128 kbps).
+//! Always constant bitrate; see [`MP3_CBR_KBPS`](crate::render::MP3_CBR_KBPS)
+//! for why VBR is not offered. LAME is C with an
 //! autotools build and cannot be cross-compiled to `wasm32-unknown-unknown`,
 //! which has no libc, so the browser build encodes with Shine
 //! (`shine-rs`) — a pure-Rust MPEG Layer III encoder that needs no C at all.
@@ -28,29 +31,49 @@ use crate::sink::enc_err;
 /// against the MPEG rate table and refuses the rest, so this is one of the
 /// few places where the two builds genuinely differ in behaviour rather than
 /// in sound.
-pub(crate) fn validate(sample_rate: u32) -> Result<()> {
+pub(crate) fn validate(sample_rate: u32, kbps: u32) -> Result<()> {
     #[cfg(feature = "mp3")]
     {
         let _ = sample_rate;
-        Ok(())
+        lame_bitrate(kbps).map(|_| ())
     }
     #[cfg(all(feature = "mp3-shine", not(feature = "mp3")))]
     {
         shine_rs::mp3_encoder::Mp3EncoderConfig::new()
             .sample_rate(sample_rate)
-            .bitrate(320)
+            .bitrate(kbps)
             .channels(2)
             .validate()
             .map_err(|_| {
                 crate::error::EngineError::Encode(format!(
                     "this build encodes MP3 with Shine, which has no {sample_rate} Hz mode \
-                     (32, 44.1 and 48 kHz work) — export FLAC or WAV for this take"
+                     at {kbps} kbps (32, 44.1 and 48 kHz work) — export FLAC or WAV for this take"
                 ))
             })
     }
 }
 
-/// Streaming MP3 writer (LAME, CBR 320 kbps, best quality). LAME takes the
+#[cfg(feature = "mp3")]
+fn lame_bitrate(kbps: u32) -> Result<mp3lame_encoder::Bitrate> {
+    use mp3lame_encoder::Bitrate as B;
+    Ok(match kbps {
+        96 => B::Kbps96,
+        112 => B::Kbps112,
+        128 => B::Kbps128,
+        160 => B::Kbps160,
+        192 => B::Kbps192,
+        224 => B::Kbps224,
+        256 => B::Kbps256,
+        320 => B::Kbps320,
+        other => {
+            return Err(crate::error::EngineError::Encode(format!(
+                "{other} kbps is not an MP3 bitrate this engine encodes"
+            )))
+        }
+    })
+}
+
+/// Streaming MP3 writer (LAME, CBR, best quality). LAME takes the
 /// float samples directly, so quantisation/dither do not apply here.
 #[cfg(feature = "mp3")]
 pub struct Mp3Writer<W: Write> {
@@ -63,14 +86,17 @@ pub struct Mp3Writer<W: Write> {
 
 #[cfg(feature = "mp3")]
 impl<W: Write> Mp3Writer<W> {
-    pub(crate) fn create(file: W, sample_rate: u32) -> Result<Mp3Writer<W>> {
+    pub(crate) fn create(file: W, sample_rate: u32, kbps: u32) -> Result<Mp3Writer<W>> {
         let mut builder = mp3lame_encoder::Builder::new()
             .ok_or_else(|| crate::error::EngineError::Encode("lame init failed".into()))?;
         builder.set_num_channels(2).map_err(enc_err)?;
         builder.set_sample_rate(sample_rate).map_err(enc_err)?;
+        // CBR stated explicitly rather than relied on as LAME's default:
+        // a VBR stream is exactly what the band player must not receive.
         builder
-            .set_brate(mp3lame_encoder::Bitrate::Kbps320)
+            .set_vbr_mode(mp3lame_encoder::VbrMode::Off)
             .map_err(enc_err)?;
+        builder.set_brate(lame_bitrate(kbps)?).map_err(enc_err)?;
         builder
             .set_quality(mp3lame_encoder::Quality::Best)
             .map_err(enc_err)?;
@@ -87,7 +113,7 @@ impl<W: Write> Mp3Writer<W> {
     pub(crate) fn write_block(&mut self, stereo: &[f64]) -> Result<()> {
         self.left.clear();
         self.right.clear();
-        for fr in stereo.chunks_exact(2) {
+        for fr in stereo.as_chunks::<2>().0 {
             self.left.push(fr[0].clamp(-1.0, 1.0));
             self.right.push(fr[1].clamp(-1.0, 1.0));
         }
@@ -119,7 +145,7 @@ impl<W: Write> Mp3Writer<W> {
     }
 }
 
-/// Streaming MP3 writer for the browser (Shine, CBR 320 kbps).
+/// Streaming MP3 writer for the browser (Shine, CBR).
 ///
 /// Shine takes 16-bit samples, so unlike the LAME path this one quantises.
 /// Deliberately without dither: the quantisation noise sits around −96 dBFS,
@@ -148,7 +174,7 @@ unsafe impl<W: Write + Send> Send for Mp3Writer<W> {}
 
 #[cfg(all(feature = "mp3-shine", not(feature = "mp3")))]
 impl<W: Write> Mp3Writer<W> {
-    pub(crate) fn create(file: W, sample_rate: u32) -> Result<Mp3Writer<W>> {
+    pub(crate) fn create(file: W, sample_rate: u32, kbps: u32) -> Result<Mp3Writer<W>> {
         use shine_rs::mp3_encoder::{Mp3Encoder, Mp3EncoderConfig, StereoMode};
         // Plain stereo, and not because joint stereo was weighed and lost:
         // Shine has no M/S transform at all (`mode_ext` is hard-coded to 0),
@@ -162,7 +188,7 @@ impl<W: Write> Mp3Writer<W> {
         // but it is why a master belongs in LAME's hands.
         let config = Mp3EncoderConfig::new()
             .sample_rate(sample_rate)
-            .bitrate(320)
+            .bitrate(kbps)
             .channels(2)
             .stereo_mode(StereoMode::Stereo);
         Ok(Mp3Writer {

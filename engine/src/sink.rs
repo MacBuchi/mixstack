@@ -1,7 +1,8 @@
 //! Output sinks for the render pass: WAV (hound), FLAC (flacenc,
-//! frame-by-frame so multi-hour takes never buffer in RAM), MP3 (CBR
-//! 320 kbps — parity with the Python tool's exports; which encoder does the
-//! work is [`mp3`](crate::mp3)'s business, not this module's).
+//! frame-by-frame so multi-hour takes never buffer in RAM), MP3 (CBR at a
+//! chosen bitrate, 320 kbps by default — parity with the Python tool's
+//! exports; which encoder does the work is [`mp3`](crate::mp3)'s business,
+//! not this module's).
 //!
 //! All sinks consume interleaved stereo f64 blocks in [−1, 1] and own the
 //! final quantisation; TPDF dither is applied by the caller's `TpdfDither`
@@ -204,11 +205,13 @@ impl StereoSink<std::io::BufWriter<std::fs::File>> {
         out: &OutputHandle,
         format: OutputFormat,
         sample_rate: u32,
+        mp3_kbps: u32,
     ) -> Result<StereoSink<std::io::BufWriter<std::fs::File>>> {
         StereoSink::new(
             std::io::BufWriter::new(out.create_file()?),
             format,
             sample_rate,
+            mp3_kbps,
         )
     }
 }
@@ -222,9 +225,18 @@ impl StereoSink<std::io::BufWriter<std::fs::File>> {
 /// The answer is not the same everywhere: LAME resamples rates it does not
 /// encode natively, Shine refuses them, so a 96 kHz take can export to MP3
 /// from the app but not from the browser.
-pub fn validate_format(format: OutputFormat, sample_rate: u32) -> Result<()> {
+///
+/// `mp3_kbps` is only looked at for MP3 and must be one of
+/// [`MP3_CBR_KBPS`](crate::render::MP3_CBR_KBPS).
+pub fn validate_format(format: OutputFormat, sample_rate: u32, mp3_kbps: u32) -> Result<()> {
     if format != OutputFormat::Mp3 {
         return Ok(());
+    }
+    if !crate::render::MP3_CBR_KBPS.contains(&mp3_kbps) {
+        return Err(EngineError::Encode(format!(
+            "{mp3_kbps} kbps is not an MP3 bitrate this engine encodes (one of {:?})",
+            crate::render::MP3_CBR_KBPS
+        )));
     }
     #[cfg(not(feature = "mp3-any"))]
     {
@@ -234,13 +246,18 @@ pub fn validate_format(format: OutputFormat, sample_rate: u32) -> Result<()> {
         ));
     }
     #[cfg(feature = "mp3-any")]
-    crate::mp3::validate(sample_rate)
+    crate::mp3::validate(sample_rate, mp3_kbps)
 }
 
 impl<W: Write + Seek> StereoSink<W> {
     /// Render target over any seekable writer — a file natively, a
     /// [`ChunkSink`] where there is no filesystem.
-    pub fn new(file: W, format: OutputFormat, sample_rate: u32) -> Result<StereoSink<W>> {
+    pub fn new(
+        file: W,
+        format: OutputFormat,
+        sample_rate: u32,
+        mp3_kbps: u32,
+    ) -> Result<StereoSink<W>> {
         match format {
             OutputFormat::Wav16 | OutputFormat::Wav24 | OutputFormat::Wav32Float => {
                 let spec = hound::WavSpec {
@@ -274,7 +291,14 @@ impl<W: Write + Seek> StereoSink<W> {
                 )?))
             }
             #[cfg(feature = "mp3-any")]
-            OutputFormat::Mp3 => Ok(StereoSink::Mp3(Mp3Writer::create(file, sample_rate)?)),
+            OutputFormat::Mp3 => {
+                validate_format(format, sample_rate, mp3_kbps)?;
+                Ok(StereoSink::Mp3(Mp3Writer::create(
+                    file,
+                    sample_rate,
+                    mp3_kbps,
+                )?))
+            }
             #[cfg(not(feature = "mp3-any"))]
             OutputFormat::Mp3 => Err(EngineError::Encode(
                 "MP3 export is not built into this target (no mp3 feature enabled)".into(),

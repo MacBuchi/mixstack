@@ -216,7 +216,7 @@ impl TruePeakLimiter {
     /// delay line primes).
     pub fn process(&mut self, stereo_in: &[f64], out: &mut Vec<f64>) {
         debug_assert_eq!(stereo_in.len() % 2, 0);
-        for fr in stereo_in.chunks_exact(2) {
+        for fr in stereo_in.as_chunks::<2>().0 {
             self.push_frame(fr[0], fr[1], out);
         }
     }
