@@ -14,7 +14,7 @@ hound = "3.5"
 # in rust/src/android.rs. Without it every play tap panics (issue #88).
 cpal = { version = "0.18", optional = true }
 ebur128 = "0.1"
-rtrb = { version = "0.3", optional = true }
+rtrb = { version = "0.4", optional = true }
 flacenc = "0.5.1"
 mp3lame-encoder = { version = "0.2.4", optional = true }
 shine-rs = { version = "0.1.3", optional = true, default-features = false }
