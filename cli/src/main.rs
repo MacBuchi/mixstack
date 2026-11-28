@@ -4,7 +4,8 @@
 //! engine results into JSON. Every decision — which tracks a take has, how a
 //! template maps, how seconds become frames, the render itself — is made in
 //! `durecmix_engine::headless`, the same way `rust/` only translates for the
-//! app. Contract (schemas, exit codes): AGENTS.md, section "CLI".
+//! app. Reference for users: docs/CLI.md (kept in step with this file by
+//! `the_reference_documents_every_command_and_option` below).
 
 #[cfg(feature = "mcp")]
 mod mcp;
@@ -13,22 +14,62 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use durecmix_engine::headless::{self, HeadlessError, RenderOptions, PROBE_SCHEMA, RENDER_SCHEMA};
 use durecmix_engine::measure::{
     LevelPoint, MaskingMode, MeasureOptions, TrackSelection, COMPARE_SCHEMA, MEASURE_SCHEMA,
 };
 use durecmix_engine::render::{LoudnessMode, OutputFormat};
 use durecmix_engine::template::{UnknownTracks, TEMPLATE_SCHEMA};
+use schemars::JsonSchema;
 
 /// The release this binary belongs to (pubspec.yaml, via build.rs).
 pub(crate) const VERSION: &str = env!("MIXSTACK_VERSION");
 const ERROR_SCHEMA: &str = "mixstack.error/1";
 
+/// The exit-code table, as a macro so `concat!` can put it into --help.
+macro_rules! exit_codes {
+    () => {
+        "\
+Exit codes:
+  0  ok
+  1  render failed
+  2  usage (bad arguments, out-of-range values)
+  3  input unreadable (recording, mix or mastering reference)
+  4  the mix matches no track of the recording
+  5  output not writable (exists without --force, is the source, no folder)"
+    };
+}
+
+macro_rules! top_examples {
+    () => {
+        "\
+Examples:
+  mixstack probe take.wav
+  mixstack render take.wav --mix band.mixstack.json --out mix.mp3 --mp3-bitrate 128
+  mixstack measure take.wav --mix band.mixstack.json --start 60 --end 90
+  mixstack completions zsh > ~/.zfunc/_mixstack"
+    };
+}
+
 #[derive(Parser)]
 #[command(
     name = "mixstack",
     about = "Mix multichannel recordings down to stereo with the Mixstack engine",
+    long_about = "Mix multichannel recordings down to stereo with the Mixstack engine.\n\n\
+        The same engine as the Mixstack app: a render is byte-identical to the \
+        app's export of the same mix. Reads interleaved RIFF/RF64/BW64 WAV at \
+        any channel count; the source is never written.",
+    after_help = concat!(
+        top_examples!(),
+        "\n\nExit codes: 0 ok · 1 render failed · 2 usage · 3 input unreadable\n            4 no track matched · 5 output not writable (--help for details)"
+    ),
+    after_long_help = concat!(
+        top_examples!(),
+        "\n\n",
+        exit_codes!(),
+        "\n\nReference: docs/CLI.md in https://github.com/MacBuchi/mixstack"
+    ),
     disable_version_flag = true
 )]
 struct Cli {
@@ -42,21 +83,122 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Header-only look at a recording: format, length, tracks.
+    #[command(after_help = "\
+Examples:
+  mixstack probe take.wav
+  mixstack probe take.wav --json | jq '.tracks[].name'
+
+Exit codes: 0 ok · 2 usage · 3 input unreadable")]
     Probe {
+        /// The recording (WAV, RF64 or BW64). Only its header and iXML are read.
         input: PathBuf,
         /// Print `mixstack.probe/1` JSON instead of text.
         #[arg(long)]
         json: bool,
     },
     /// Render a recording with a template or session to a stereo file.
+    #[command(after_help = "\
+Examples:
+  mixstack render take.wav --mix band.mixstack.json --out mix.wav
+  mixstack render take.wav --mix band.mixstack.json --out song.mp3 \\
+      --start 2.8 --end 120 --fade-out-ms 500 --loudness lufs:-16 --mp3-bitrate 128
+
+The file appears under its final name only when complete (written as a
+hidden .<name>.partial beside it first). Progress: JSON lines on stderr,
+{\"progress\":0.42,\"pass\":2}.
+
+Exit codes: 0 ok · 1 render failed · 2 usage · 3 input unreadable
+            4 no track matched · 5 output not writable")]
     Render(RenderArgs),
     /// Measure a mix and its tracks: loudness, spectrum, masking, stereo.
+    #[command(after_help = "\
+Examples:
+  mixstack measure take.wav                              # every track at unity
+  mixstack measure take.wav --mix band.mixstack.json --start 60 --end 90
+  mixstack measure take.wav --mix band.mixstack.json --masking pairs:Kick,Bass --json
+
+Exit codes: 0 ok · 1 measurement failed · 2 usage · 3 input unreadable · 4 no track matched")]
     Measure(MeasureArgs),
     /// Measure two mixes of one recording and report the differences (b − a).
+    #[command(after_help = "\
+Examples:
+  mixstack compare take.wav --mix-a before.mixstack.json --mix-b after.mixstack.json
+  mixstack compare take.wav --mix-a a.json --mix-b b.json --start 60 --end 90 --json
+
+The recording is read once for both mixes.
+Exit codes: 0 ok · 1 measurement failed · 2 usage · 3 input unreadable · 4 no track matched")]
     Compare(CompareArgs),
     /// Serve the engine to an agent over MCP (stdio).
     #[cfg(feature = "mcp")]
+    #[command(after_help = "\
+Example (Claude Code):
+  claude mcp add mixstack -- mixstack mcp --allow ~/Recordings --out-dir ~/mixstack-out
+
+stdout carries the protocol; logs go to stderr. Reads only below --allow (and
+--out-dir), writes only plain file names into --out-dir.")]
     Mcp(McpArgs),
+    /// Print the JSON Schema of an input or output document.
+    #[command(after_help = "\
+Examples:
+  mixstack schema render > mixstack.render-1.schema.json
+  mixstack schema mix    # the template format, mixstack.mix/1")]
+    Schema {
+        /// Which document.
+        #[arg(value_enum)]
+        name: SchemaName,
+    },
+    /// Print a shell completion script.
+    #[command(after_help = "\
+Examples:
+  mixstack completions zsh  > ~/.zfunc/_mixstack     # with fpath+=~/.zfunc
+  mixstack completions bash > ~/.local/share/bash-completion/completions/mixstack
+  mixstack completions fish > ~/.config/fish/completions/mixstack.fish")]
+    Completions {
+        /// The shell to generate for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Write man pages (mixstack.1 and one per command) into a folder.
+    #[command(after_help = "\
+Example:
+  mixstack man --out-dir ~/.local/share/man/man1 && man mixstack-render")]
+    Man {
+        /// Target folder; created if missing. Existing pages are replaced.
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+}
+
+/// The documents `mixstack schema` describes.
+#[derive(Clone, Copy, ValueEnum)]
+enum SchemaName {
+    /// `mixstack.mix/1`, the template (input of render/measure/compare).
+    Mix,
+    /// `mixstack.probe/1`.
+    Probe,
+    /// `mixstack.render/1`.
+    Render,
+    /// `mixstack.measure/1`.
+    Measure,
+    /// `mixstack.compare/1`.
+    Compare,
+    /// `mixstack.error/1`, printed on stdout with --json when a command fails.
+    Error,
+}
+
+/// `mixstack.error/1`: what stdout carries with --json when a command fails.
+#[derive(serde::Serialize, JsonSchema)]
+struct ErrorOutput {
+    /// Always `mixstack.error/1`.
+    schema: &'static str,
+    /// The process exit code (1–5).
+    code: u8,
+    /// `render`, `usage`, `input`, `no_match` or `output`.
+    kind: &'static str,
+    /// Human-readable; the same text as on stderr.
+    message: String,
+    /// The release of this binary.
+    engine: &'static str,
 }
 
 #[cfg(feature = "mcp")]
@@ -99,6 +241,7 @@ struct MeasureFlags {
     /// contribution to the mix.
     #[arg(long)]
     pre_fader: bool,
+    /// What happens to tracks of the recording the mix does not know.
     #[arg(long, value_enum, default_value_t = UnknownArg::Exclude)]
     unknown_tracks: UnknownArg,
     /// Print JSON instead of text.
@@ -142,6 +285,7 @@ impl MeasureFlags {
 
 #[derive(clap::Args)]
 struct MeasureArgs {
+    /// The recording (WAV, RF64 or BW64).
     input: PathBuf,
     /// Template or session; without it, every track at unity (a fresh mix).
     #[arg(long)]
@@ -152,9 +296,12 @@ struct MeasureArgs {
 
 #[derive(clap::Args)]
 struct CompareArgs {
+    /// The recording (WAV, RF64 or BW64).
     input: PathBuf,
+    /// The first mix (template or session) — the "before".
     #[arg(long)]
     mix_a: PathBuf,
+    /// The second mix — the "after"; deltas are b − a.
     #[arg(long)]
     mix_b: PathBuf,
     #[command(flatten)]
@@ -186,6 +333,7 @@ fn parse_masking(s: &str) -> Result<MaskingMode, String> {
 
 #[derive(clap::Args)]
 struct RenderArgs {
+    /// The recording (WAV, RF64 or BW64). Never written.
     input: PathBuf,
     /// A `mixstack.mix/1` template or a stored session (`*.durecmix.json`).
     #[arg(long)]
@@ -202,8 +350,10 @@ struct RenderArgs {
     /// Trim-out, seconds from the start of the recording.
     #[arg(long)]
     end: Option<f64>,
+    /// Fade-in length in milliseconds, from the trim-in point.
     #[arg(long, default_value_t = 0.0)]
     fade_in_ms: f64,
+    /// Fade-out length in milliseconds, ending at the trim-out point.
     #[arg(long, default_value_t = 0.0)]
     fade_out_ms: f64,
     /// `lufs:<target>`, `peak:<dBFS>` or `none`; overrides the template.
@@ -518,6 +668,53 @@ fn compare_cmd(a: &CompareArgs) -> Result<(), HeadlessError> {
     Ok(())
 }
 
+/// The JSON Schema of one document, titled with its contract name.
+fn schema_value(name: SchemaName) -> serde_json::Value {
+    use durecmix_engine::headless::{CompareOutput, MeasureOutput, ProbeOutput, RenderOutput};
+    use durecmix_engine::template::Template;
+    let (id, schema) = match name {
+        SchemaName::Mix => (TEMPLATE_SCHEMA, schemars::schema_for!(Template)),
+        SchemaName::Probe => (PROBE_SCHEMA, schemars::schema_for!(ProbeOutput)),
+        SchemaName::Render => (RENDER_SCHEMA, schemars::schema_for!(RenderOutput)),
+        SchemaName::Measure => (MEASURE_SCHEMA, schemars::schema_for!(MeasureOutput)),
+        SchemaName::Compare => (COMPARE_SCHEMA, schemars::schema_for!(CompareOutput)),
+        SchemaName::Error => (ERROR_SCHEMA, schemars::schema_for!(ErrorOutput)),
+    };
+    let mut value = serde_json::to_value(&schema).expect("a schema serialises");
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("title".into(), id.into());
+    }
+    value
+}
+
+/// mixstack.1 plus mixstack-<command>.1 for every visible command.
+fn write_man_pages(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let cmd = Cli::command().version(VERSION);
+    let mut written = Vec::new();
+    let mut page = |c: clap::Command, file: String| -> std::io::Result<()> {
+        let mut buf = Vec::new();
+        clap_mangen::Man::new(c).render(&mut buf)?;
+        let path = dir.join(file);
+        std::fs::write(&path, buf)?;
+        written.push(path);
+        Ok(())
+    };
+    page(cmd.clone(), "mixstack.1".into())?;
+    for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+        let name = format!("mixstack-{}", sub.get_name());
+        page(
+            sub.clone()
+                .name(name.clone())
+                .bin_name(format!("mixstack {}", sub.get_name()))
+                .version(VERSION)
+                .disable_version_flag(true),
+            format!("{name}.1"),
+        )?;
+    }
+    Ok(written)
+}
+
 fn version_line() -> String {
     format!(
         "mixstack {VERSION} {TEMPLATE_SCHEMA} {PROBE_SCHEMA} {RENDER_SCHEMA} {MEASURE_SCHEMA} {COMPARE_SCHEMA}"
@@ -535,6 +732,33 @@ fn main() -> ExitCode {
         Some(Cmd::Render(a)) => (render(a), a.json),
         Some(Cmd::Measure(a)) => (measure_cmd(a), a.flags.json),
         Some(Cmd::Compare(a)) => (compare_cmd(a), a.flags.json),
+        Some(Cmd::Schema { name }) => {
+            print_json(&schema_value(*name));
+            return ExitCode::SUCCESS;
+        }
+        Some(Cmd::Completions { shell }) => {
+            clap_complete::generate(
+                *shell,
+                &mut Cli::command(),
+                "mixstack",
+                &mut std::io::stdout(),
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(Cmd::Man { out_dir }) => {
+            return match write_man_pages(out_dir) {
+                Ok(files) => {
+                    for f in files {
+                        println!("{}", f.display());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("mixstack: {}: {e}", out_dir.display());
+                    ExitCode::from(5)
+                }
+            };
+        }
         #[cfg(feature = "mcp")]
         Some(Cmd::Mcp(a)) => {
             // stdout is the protocol channel here: nothing else may print.
@@ -548,7 +772,7 @@ fn main() -> ExitCode {
         }
         None => {
             eprintln!(
-                "{}\n\nUsage: mixstack <probe|render|measure|compare> … (see --help)",
+                "{}\n\nUsage: mixstack <command> … (see mixstack --help)",
                 version_line()
             );
             return ExitCode::from(2);
@@ -560,15 +784,106 @@ fn main() -> ExitCode {
             let code = exit_code(&e);
             eprintln!("mixstack: {e}");
             if json {
-                print_json(&serde_json::json!({
-                    "schema": ERROR_SCHEMA,
-                    "code": code,
-                    "kind": error_kind(&e),
-                    "message": e.to_string(),
-                    "engine": VERSION,
-                }));
+                print_json(&ErrorOutput {
+                    schema: ERROR_SCHEMA,
+                    code,
+                    kind: error_kind(&e),
+                    message: e.to_string(),
+                    engine: VERSION,
+                });
             }
             ExitCode::from(code)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_clap_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    /// docs/CLI.md is the human reference. It must name every visible
+    /// command under its own `## mixstack <command>` heading, and every
+    /// option of that command inside its section — an option added here
+    /// and forgotten there fails this test instead of going undocumented.
+    #[test]
+    fn the_reference_documents_every_command_and_option() {
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/CLI.md"))
+            .expect("docs/CLI.md exists");
+        let cmd = Cli::command();
+        let mut missing = Vec::new();
+        for sub in cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+            let heading = format!("## `mixstack {}`", sub.get_name());
+            let Some(start) = doc.find(&heading) else {
+                missing.push(heading);
+                continue;
+            };
+            let rest = &doc[start + heading.len()..];
+            let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+            for arg in sub.get_arguments() {
+                if arg.is_hide_set() {
+                    continue;
+                }
+                if let Some(long) = arg.get_long() {
+                    if long == "help" {
+                        continue;
+                    }
+                    if !section.contains(&format!("--{long}")) {
+                        missing.push(format!("{} --{long}", sub.get_name()));
+                    }
+                }
+            }
+        }
+        for schema in [
+            TEMPLATE_SCHEMA,
+            PROBE_SCHEMA,
+            RENDER_SCHEMA,
+            MEASURE_SCHEMA,
+            COMPARE_SCHEMA,
+            ERROR_SCHEMA,
+        ] {
+            if !doc.contains(schema) {
+                missing.push(schema.to_string());
+            }
+        }
+        assert!(missing.is_empty(), "docs/CLI.md lacks: {missing:?}");
+    }
+
+    /// The exit codes in --help, docs/CLI.md and `exit_code` must agree.
+    #[test]
+    fn the_exit_codes_are_documented_where_they_are_defined() {
+        let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/CLI.md"))
+            .unwrap();
+        for code in 0..=5 {
+            assert!(
+                exit_codes!().contains(&format!("  {code}  ")),
+                "the --help exit-code table lacks {code}"
+            );
+            assert!(
+                doc.contains(&format!("| `{code}` |")),
+                "docs/CLI.md lacks exit code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_schema_is_an_object_schema_titled_with_its_contract() {
+        for name in SchemaName::value_variants() {
+            let v = schema_value(*name);
+            let title = v["title"].as_str().unwrap();
+            assert!(
+                title.starts_with("mixstack.") && title.ends_with("/1"),
+                "{title}"
+            );
+            assert_eq!(v["type"], "object", "{title}");
+            assert!(
+                v["properties"].as_object().is_some_and(|p| !p.is_empty()),
+                "{title}"
+            );
         }
     }
 }

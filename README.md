@@ -86,6 +86,31 @@ The original Python tool ran on desktop only, loaded entire recordings into RAM,
 - iOS on-device verification (macOS/Windows/Android are device-tested)
 - Signed store releases (needs an Apple Developer account)
 
+## Command line and AI agents
+
+The engine also runs without the app, as the `mixstack` command-line tool —
+for scripts, batch jobs and other programs. A render is byte-identical to the
+app's export of the same mix.
+
+```sh
+mixstack probe take.wav                                             # tracks, format, length
+mixstack render take.wav --mix band.mixstack.json --out song.mp3 \
+    --start 2.8 --end 120 --loudness lufs:-16 --mp3-bitrate 128
+mixstack measure take.wav --mix band.mixstack.json --start 60 --end 90   # loudness, spectrum, masking
+mixstack compare take.wav --mix-a before.json --mix-b after.json
+```
+
+Every command can answer in versioned JSON (`--json`, schemas via
+`mixstack schema`), with documented exit codes. `mixstack mcp` serves the same
+engine to AI assistants such as Claude over the Model Context Protocol: an
+agent can load a mix, measure it, adjust faders and EQ, compare and render —
+reading only the folders you allow and writing only into one output folder.
+
+Install from a release zip (macOS, Apple Silicon) or with
+`cargo install --locked --path cli`. Full reference:
+**[docs/CLI.md](docs/CLI.md)** · templates: [docs/TEMPLATE.md](docs/TEMPLATE.md)
+· measurement: [docs/MEASURE.md](docs/MEASURE.md).
+
 ## Support
 
 Mixstack is free and has no ads, and it stays that way. If you would like to
