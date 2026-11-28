@@ -5,7 +5,7 @@ graph (cargo tree -e normal --target all). Mixstack's own licence is
 the MIT LICENSE in the repository root.
 
 235 crates, 113 licence texts.
-Generated from Cargo.lock sha256 f293b097d3f28027d07a2acb90b480cb2664f4a0e2d14398efe0e43ceb152ac2
+Generated from Cargo.lock sha256 645b3b2388e3d95a1fc4e1b8390b94a6b5060ce836bc10b4d81a1400140a6200
 
 ========================================================================
   addr2line 0.25.1 — Apache-2.0 OR MIT
@@ -6688,7 +6688,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ========================================================================
-  quick-xml 0.41.0 — MIT
+  quick-xml 0.42.0 — MIT
 ========================================================================
 
 The MIT License (MIT)
